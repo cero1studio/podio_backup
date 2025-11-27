@@ -8,6 +8,9 @@ interface Props {
   logs: ProcessLog[];
   onDownload: () => void;
   onReset: () => void;
+  onPause: () => void;
+  onResume: () => void;
+  onCancel: () => void;
 }
 
 export const ProcessDashboard: React.FC<Props> = ({
@@ -16,9 +19,13 @@ export const ProcessDashboard: React.FC<Props> = ({
   apiStats,
   logs,
   onDownload,
-  onReset
+  onReset,
+  onPause,
+  onResume,
+  onCancel
 }) => {
   const logEndRef = useRef<HTMLDivElement>(null);
+  
   const isProcessing = [
     AppStatus.AUTHENTICATING,
     AppStatus.SELECTING_DIR,
@@ -26,6 +33,8 @@ export const ProcessDashboard: React.FC<Props> = ({
     AppStatus.PROCESSING_BATCHES,
     AppStatus.WRITING_TO_DISK
   ].includes(status);
+
+  const isPaused = status === AppStatus.PAUSED;
 
   // Auto-scroll logs
   useEffect(() => {
@@ -47,16 +56,20 @@ export const ProcessDashboard: React.FC<Props> = ({
         
         {/* Apps Progress */}
         <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100">
-          <p className="text-xs text-gray-500 uppercase tracking-wide">Apps Procesadas</p>
+          <p className="text-xs text-gray-500 uppercase tracking-wide">Progreso Global</p>
           <div className="flex items-end gap-2 mt-1">
             <span className="text-xl font-bold text-gray-800">{stats.processedApps}</span>
-            <span className="text-xs text-gray-400 mb-1">/ {stats.totalApps}</span>
+            <span className="text-xs text-gray-400 mb-1">/ {stats.totalApps} Apps</span>
           </div>
           <div className="w-full bg-gray-100 h-1.5 mt-2 rounded-full overflow-hidden">
             <div 
-              className="bg-blue-500 h-full transition-all duration-300"
+              className={`h-full transition-all duration-300 ${status === AppStatus.DISCOVERING_STRUCTURE ? 'bg-yellow-400 animate-pulse' : 'bg-blue-500'}`}
               style={{ width: `${stats.totalApps > 0 ? (stats.processedApps / stats.totalApps) * 100 : 0}%` }}
             ></div>
+          </div>
+          <div className="flex justify-between mt-1 text-[10px] text-gray-400">
+             <span>{stats.processedOrgs}/{stats.totalOrgs} Orgs</span>
+             <span>{stats.processedSpaces}/{stats.totalSpaces} Espacios</span>
           </div>
         </div>
         
@@ -67,19 +80,24 @@ export const ProcessDashboard: React.FC<Props> = ({
              <span className="text-xl font-bold text-green-600">{stats.totalFilesDownloaded}</span>
              <span className="text-xs text-gray-400 mb-1">/ {stats.totalFilesFound}</span>
            </div>
+           <p className="text-[10px] text-gray-400 mt-2">
+              {stats.totalExcelsGenerated} Excels Generados
+           </p>
         </div>
 
         {/* Status */}
-        <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 border-l-4 border-l-indigo-500">
+        <div className={`bg-white p-4 rounded-xl shadow-sm border border-gray-100 border-l-4 ${isPaused ? 'border-l-orange-500' : 'border-l-indigo-500'}`}>
           <p className="text-xs text-gray-500 uppercase tracking-wide">Estado Actual</p>
           <p className="text-sm font-bold text-gray-800 mt-1 truncate">
             {status === AppStatus.IDLE && 'Esperando'}
             {status === AppStatus.AUTHENTICATING && 'Autenticando...'}
             {status === AppStatus.READY_TO_BACKUP && 'Esperando Confirmación'}
             {status === AppStatus.SELECTING_DIR && 'Selecciona Carpeta...'}
-            {status === AppStatus.DISCOVERING_STRUCTURE && 'Escaneando...'}
-            {status === AppStatus.WRITING_TO_DISK && 'Guardando...'}
-            {status === AppStatus.COMPLETED && 'Completado'}
+            {status === AppStatus.DISCOVERING_STRUCTURE && <span className="text-yellow-600">Escaneando Estructura...</span>}
+            {status === AppStatus.WRITING_TO_DISK && <span className="text-blue-600">Descargando...</span>}
+            {status === AppStatus.PAUSED && <span className="text-orange-500 uppercase animate-pulse">❚❚ Pausado</span>}
+            {status === AppStatus.CANCELLED && <span className="text-red-500">Cancelado por usuario</span>}
+            {status === AppStatus.COMPLETED && <span className="text-green-600">¡Completado!</span>}
             {status === AppStatus.ERROR && 'Error'}
           </p>
         </div>
@@ -115,18 +133,51 @@ export const ProcessDashboard: React.FC<Props> = ({
 
       </div>
 
-      {/* Progress Monitor - Current Action */}
-      {isProcessing && (
-        <div className="bg-blue-50 p-3 rounded-lg border border-blue-100 flex items-center gap-3 text-sm">
-             <i className="fa-solid fa-spinner fa-spin text-blue-600"></i>
-             <div className="flex flex-wrap gap-2 items-center text-blue-900">
-                <span className="font-semibold">Procesando:</span>
-                 {stats.currentOrg && <span><i className="fa-regular fa-building text-blue-400"></i> {stats.currentOrg}</span>}
-                 <span className="text-blue-300">/</span>
-                 {stats.currentSpace && <span><i className="fa-regular fa-folder text-blue-400"></i> {stats.currentSpace}</span>}
-                 <span className="text-blue-300">/</span>
-                 {stats.currentApp && <span className="bg-white px-2 py-0.5 rounded shadow-sm font-medium"><i className="fa-solid fa-table text-blue-500"></i> {stats.currentApp}</span>}
-             </div>
+      {/* Control Bar - Only Visible when Active or Paused */}
+      {(isProcessing || isPaused) && (
+        <div className="bg-white p-3 rounded-lg border border-gray-200 shadow-sm flex items-center justify-between">
+            <div className="flex items-center gap-3 text-sm">
+                <i className={`fa-solid ${isPaused ? 'fa-pause' : 'fa-spinner fa-spin'} text-indigo-600`}></i>
+                <div className="flex flex-wrap gap-2 items-center text-gray-700">
+                    <span className="font-semibold">
+                        {status === AppStatus.DISCOVERING_STRUCTURE ? 'Analizando:' : 'Procesando:'}
+                    </span>
+                    {stats.currentOrg && <span>{stats.currentOrg}</span>}
+                    <span className="text-gray-300">/</span>
+                    {stats.currentSpace && <span>{stats.currentSpace}</span>}
+                    {stats.currentApp && (
+                        <>
+                            <span className="text-gray-300">/</span>
+                            <span className="bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded text-xs font-medium border border-indigo-100">{stats.currentApp}</span>
+                        </>
+                    )}
+                </div>
+            </div>
+
+            <div className="flex gap-2">
+                {!isPaused ? (
+                    <button 
+                        onClick={onPause}
+                        className="px-4 py-2 bg-orange-100 hover:bg-orange-200 text-orange-700 rounded-lg text-sm font-medium transition flex items-center gap-2"
+                    >
+                        <i className="fa-solid fa-pause"></i> Pausar
+                    </button>
+                ) : (
+                    <button 
+                        onClick={onResume}
+                        className="px-4 py-2 bg-green-100 hover:bg-green-200 text-green-700 rounded-lg text-sm font-medium transition flex items-center gap-2 animate-pulse"
+                    >
+                        <i className="fa-solid fa-play"></i> Reanudar
+                    </button>
+                )}
+                
+                <button 
+                    onClick={onCancel}
+                    className="px-4 py-2 bg-red-100 hover:bg-red-200 text-red-700 rounded-lg text-sm font-medium transition flex items-center gap-2"
+                >
+                    <i className="fa-solid fa-stop"></i> Cancelar
+                </button>
+            </div>
         </div>
       )}
 
@@ -153,7 +204,7 @@ export const ProcessDashboard: React.FC<Props> = ({
       {/* Main Content Area - Full Width Console */}
       <div className="w-full">
         
-        {/* Left: Console Logs */}
+        {/* Console Logs */}
         <div className="space-y-4">
           <div className="bg-black rounded-xl shadow-lg border border-gray-800 overflow-hidden flex flex-col h-[500px]">
             <div className="px-4 py-2 bg-gray-800 border-b border-gray-700 flex justify-between items-center">
@@ -201,9 +252,19 @@ export const ProcessDashboard: React.FC<Props> = ({
                   </div>
                </div>
              )}
+
+             {status === AppStatus.CANCELLED && (
+               <div className="flex-1 bg-red-50 text-red-800 border border-red-200 px-4 py-3 rounded-lg flex items-center justify-center gap-3">
+                  <i className="fa-solid fa-ban text-2xl text-red-600"></i>
+                  <div className="text-left">
+                      <p className="font-bold text-sm">Backup Cancelado</p>
+                      <p className="text-xs opacity-80">Se detuvo el proceso a petición del usuario.</p>
+                  </div>
+               </div>
+             )}
              
              {(!isProcessing && status !== AppStatus.IDLE) && (
-               <button onClick={onReset} className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition text-sm font-medium">
+               <button onClick={onReset} className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition text-sm font-medium ml-auto">
                  Reiniciar
                </button>
              )}

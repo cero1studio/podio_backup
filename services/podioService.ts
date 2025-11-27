@@ -67,7 +67,16 @@ export class PodioService {
     }
 
     try {
-      const response = await fetch(targetUrl, { ...options, headers });
+      let response = await fetch(targetUrl, { ...options, headers });
+      
+      // MANEJO DE RATE LIMIT (429)
+      if (response.status === 429) {
+          if (this.onNetworkLog) this.onNetworkLog("⚠ Rate Limit Alcanzado (429). Pausando 60s...");
+          
+          await new Promise(resolve => setTimeout(resolve, 60000));
+          // Reintentar una vez
+          response = await fetch(targetUrl, { ...options, headers });
+      }
 
       const limit = response.headers.get('X-Rate-Limit-Limit');
       const remaining = response.headers.get('X-Rate-Limit-Remaining');
@@ -84,10 +93,7 @@ export class PodioService {
         throw new Error("Token expirado o credenciales inválidas (401).");
       }
       
-      if (response.status === 429) {
-         throw new Error("Has excedido el límite de Podio (429). Espera unos minutos.");
-      }
-
+      // Dejamos pasar errores normales para que los métodos los manejen
       return response;
     } catch (error) {
       throw error;
@@ -142,11 +148,16 @@ export class PodioService {
     return await response.json();
   }
 
-  async triggerAppExcelExport(appId: number): Promise<number> {
+  // Ahora acepta limitCount
+  async triggerAppExcelExport(appId: number, limitCount: number = 20000): Promise<number> {
     try {
-      const response = await this.request(`/app/${appId}/xlsx/`, {
+      // Endpoint oficial para batch export de items
+      const response = await this.request(`/item/app/${appId}/export/xlsx`, {
         method: 'POST',
-        body: JSON.stringify({ limit: 20000 })
+        body: JSON.stringify({ 
+            limit: limitCount,
+            sort_desc: true 
+        })
       });
       
       if (!response.ok) {
@@ -154,7 +165,7 @@ export class PodioService {
         return -1;
       }
       
-      const data: PodioBatch = await response.json();
+      const data: any = await response.json();
       return data.batch_id;
     } catch (e) {
       console.error(`Excepción en triggerAppExcelExport:`, e);
@@ -164,7 +175,7 @@ export class PodioService {
 
   async waitForBatch(batchId: number): Promise<PodioBatch | null> {
     let attempts = 0;
-    const maxAttempts = 60; // Esperar hasta 2 minutos
+    const maxAttempts = 120; // Aumentado a 4 minutos por seguridad en grandes cargas
     
     while (attempts < maxAttempts) {
       const response = await this.request(`/batch/${batchId}`);
@@ -172,6 +183,10 @@ export class PodioService {
       
       const batch: PodioBatch = await response.json();
       
+      if (this.onNetworkLog && attempts % 5 === 0) {
+           this.onNetworkLog(`Batch ${batchId}: Estado '${batch.status}' (Intento ${attempts})`);
+      }
+
       if (batch.status === 'completed') {
         return batch;
       } else if (batch.status === 'failed') {
@@ -184,40 +199,49 @@ export class PodioService {
     return null; 
   }
 
-  async getAppFiles(appId: number): Promise<PodioFile[]> {
+  // Ahora acepta limit
+  async getAppFiles(appId: number, limit: number = 100): Promise<PodioFile[]> {
     let allFiles: PodioFile[] = [];
     let offset = 0;
-    const limit = 100;
+    // Si el límite pedido es pequeño (ej test mode), usamos ese. Si es grande, paginamos de 100 en 100.
+    const pageSize = limit < 100 ? limit : 100;
     let hasMore = true;
 
     try {
       while (hasMore) {
-        const response = await this.request(`/file/app/${appId}/?limit=${limit}&offset=${offset}&sort_by=created_on`);
+        // Respetamos el límite total solicitado
+        if (allFiles.length >= limit) break;
+
+        const response = await this.request(`/file/app/${appId}/?limit=${pageSize}&offset=${offset}&sort_by=created_on`);
 
         if (!response.ok) break;
 
         const files: PodioFile[] = await response.json();
         allFiles = [...allFiles, ...files];
 
-        if (files.length < limit) {
+        if (files.length < pageSize || allFiles.length >= limit) {
           hasMore = false;
         } else {
-          offset += limit;
+          offset += pageSize;
         }
       }
     } catch (e) {
       console.error("Error obteniendo lista de archivos:", e);
     }
-    return allFiles;
+    // Cortamos exacto por si nos pasamos en la última página
+    return allFiles.slice(0, limit);
   }
 
   async downloadFileContent(link: string): Promise<Blob | null> {
-    // link suele ser "https://files.podio.com/..."
-    // request() usará proxifyUrl para convertirlo en "/podio-files/..."
     try {
       const response = await this.request(link, {}, true);
       if (!response.ok) {
         console.warn(`Download Failed (${response.status}): ${link}`);
+        // Intentar leer el error si es JSON
+        try {
+            const err = await response.json();
+            console.warn("Detalle error:", err);
+        } catch {}
         return null;
       }
       return await response.blob();

@@ -6,6 +6,7 @@ export interface PodioGlobalCredentials {
   username: string; // Email
   password: string;
   useProxy: boolean; // Para bypass CORS
+  isTestMode: boolean; // Nuevo: Modo de prueba limitado
 }
 
 export interface PodioOrg {
@@ -75,17 +76,19 @@ export interface PodioBatch {
 export interface ProcessLog {
   timestamp: Date;
   message: string;
-  type: 'info' | 'success' | 'error' | 'warning' | 'network'; // Added network type
+  type: 'info' | 'success' | 'error' | 'warning' | 'network'; 
 }
 
 export enum AppStatus {
   IDLE = 'IDLE',
   AUTHENTICATING = 'AUTHENTICATING',
-  READY_TO_BACKUP = 'READY_TO_BACKUP', // Nuevo estado intermedio
+  READY_TO_BACKUP = 'READY_TO_BACKUP', 
   SELECTING_DIR = 'SELECTING_DIR',
   DISCOVERING_STRUCTURE = 'DISCOVERING_STRUCTURE',
   PROCESSING_BATCHES = 'PROCESSING_BATCHES',
   WRITING_TO_DISK = 'WRITING_TO_DISK',
+  PAUSED = 'PAUSED',     // Nuevo estado
+  CANCELLED = 'CANCELLED', // Nuevo estado
   COMPLETED = 'COMPLETED',
   ERROR = 'ERROR'
 }
@@ -94,11 +97,30 @@ export interface BackupStats {
   currentOrg?: string;
   currentSpace?: string;
   currentApp?: string;
+  
+  // Totales Globales
+  totalOrgs: number;
+  processedOrgs: number;
+  
+  totalSpaces: number;
+  processedSpaces: number;
+
   totalApps: number;
   processedApps: number;
+  
+  // Archivos
   totalExcelsGenerated: number;
   totalFilesFound: number;
   totalFilesDownloaded: number;
+}
+
+// Estructura para almacenar el plan de backup después del escaneo
+export interface BackupPlan {
+  org: PodioOrg;
+  spaces: {
+    space: PodioSpace;
+    apps: PodioApp[];
+  }[];
 }
 
 // Nuevo: Estadísticas de API en tiempo real

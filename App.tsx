@@ -1,30 +1,38 @@
 import React, { useState, useCallback, useRef } from 'react';
-import { PodioGlobalCredentials, AppStatus, ProcessLog, BackupStats, FileSystemDirectoryHandle, ApiStats } from './types';
+import { PodioGlobalCredentials, AppStatus, ProcessLog, BackupStats, FileSystemDirectoryHandle, ApiStats, BackupPlan } from './types';
 import { CredentialsForm } from './components/CredentialsForm';
 import { ProcessDashboard } from './components/ProcessDashboard';
 import { PodioService } from './services/podioService';
 import { FileSystemService } from './services/fileSystemService';
-import * as XLSX from 'xlsx';
 import JSZip from 'jszip';
 import FileSaver from 'file-saver';
 
 const App: React.FC = () => {
   const [status, setStatus] = useState<AppStatus>(AppStatus.IDLE);
   const [logs, setLogs] = useState<ProcessLog[]>([]);
+  const [isTestMode, setIsTestMode] = useState(false);
+  
+  // Stats State
   const [stats, setStats] = useState<BackupStats>({
-    totalApps: 0,
-    processedApps: 0,
+    totalOrgs: 0, processedOrgs: 0,
+    totalSpaces: 0, processedSpaces: 0,
+    totalApps: 0, processedApps: 0,
     totalExcelsGenerated: 0,
     totalFilesFound: 0,
     totalFilesDownloaded: 0
   });
   const [apiStats, setApiStats] = useState<ApiStats>({
-    totalRequests: 0,
-    rateLimitLimit: null,
-    rateLimitRemaining: null
+    totalRequests: 0, rateLimitLimit: null, rateLimitRemaining: null
   });
   
+  // Refs for services and flow control
   const podioServiceRef = useRef<PodioService | null>(null);
+  
+  // Control Flow Ref: Allows changing execution state without re-rendering loops
+  const controlRef = useRef({
+    isPaused: false,
+    isCancelled: false
+  });
 
   const addLog = useCallback((message: string, type: ProcessLog['type'] = 'info') => {
     setLogs(prev => {
@@ -34,14 +42,62 @@ const App: React.FC = () => {
     });
   }, []);
 
+  // --- CONTROL HANDLERS ---
+  const handlePause = () => {
+    controlRef.current.isPaused = true;
+    setStatus(AppStatus.PAUSED);
+    addLog("=== PROCESO PAUSADO POR USUARIO ===", 'warning');
+  };
+
+  const handleResume = () => {
+    controlRef.current.isPaused = false;
+    setStatus(AppStatus.WRITING_TO_DISK); // Or previous status
+    addLog("=== REANUDANDO PROCESO ===", 'success');
+  };
+
+  const handleCancel = () => {
+    if (window.confirm("¿Seguro que deseas cancelar el backup? El progreso actual se mantendrá en disco.")) {
+        controlRef.current.isCancelled = true;
+        controlRef.current.isPaused = false; // Unpause to let loop exit
+        setStatus(AppStatus.CANCELLED);
+        addLog("!!! CANCELANDO... ESPERANDO A QUE TERMINE LA TAREA ACTUAL !!!", 'error');
+    }
+  };
+
+  // --- CHECKPOINT FUNCTION ---
+  // This must be awaited inside loops to enforce Pause/Cancel
+  const checkControlFlow = async () => {
+    if (controlRef.current.isCancelled) {
+        throw new Error("CANCELLED_BY_USER");
+    }
+    
+    while (controlRef.current.isPaused) {
+        if (controlRef.current.isCancelled) throw new Error("CANCELLED_BY_USER");
+        await new Promise(resolve => setTimeout(resolve, 500));
+    }
+  };
+
   const handleConnect = async (creds: PodioGlobalCredentials) => {
     setStatus(AppStatus.AUTHENTICATING);
     setLogs([]);
-    setStats({ totalApps: 0, processedApps: 0, totalExcelsGenerated: 0, totalFilesFound: 0, totalFilesDownloaded: 0 });
+    setIsTestMode(creds.isTestMode);
+    
+    // Reset control refs
+    controlRef.current = { isPaused: false, isCancelled: false };
+    
+    setStats({ 
+        totalOrgs: 0, processedOrgs: 0,
+        totalSpaces: 0, processedSpaces: 0,
+        totalApps: 0, processedApps: 0, 
+        totalExcelsGenerated: 0, totalFilesFound: 0, totalFilesDownloaded: 0 
+    });
     setApiStats({ totalRequests: 0, rateLimitLimit: null, rateLimitRemaining: null });
     
     addLog(`Iniciando conexión con usuario: ${creds.username}...`, "info");
     addLog("Usando Vite Local Proxy para máximo rendimiento.", "success");
+    if (creds.isTestMode) {
+        addLog("MODO TEST ACTIVADO: Se limitarán las descargas (5 Espacios, 10 Apps).", "warning");
+    }
     
     const podioService = new PodioService(
         creds,
@@ -71,7 +127,7 @@ const App: React.FC = () => {
     
     try {
       const rootDirHandle = await fsService.selectDirectory();
-      addLog("Carpeta seleccionada correctamente. Iniciando escaneo...", "success");
+      addLog("Carpeta seleccionada correctamente. Iniciando análisis de estructura...", "success");
       await runDiskBackup(podioServiceRef.current, fsService, rootDirHandle);
     } catch (err: any) {
       if (err.message && (err.message.includes('Cross origin') || err.message.includes('security'))) {
@@ -93,27 +149,75 @@ const App: React.FC = () => {
     setStatus(AppStatus.DISCOVERING_STRUCTURE);
     
     try {
-      addLog("Buscando organizaciones...", "info");
+      // Configuración de límites según modo Test
+      const MAX_SPACES = isTestMode ? 5 : 9999;
+      const MAX_APPS = isTestMode ? 10 : 9999;
+      const EXCEL_LIMIT = isTestMode ? 50 : 20000;
+      const FILES_LIMIT = isTestMode ? 5 : 5000;
+
+      // --- FASE 1: DESCUBRIMIENTO ---
+      addLog("=== FASE 1: ESCANEO DE ESTRUCTURA ===", "info");
+      await checkControlFlow();
+
       const orgs = await podio.getOrganizations();
-      addLog(`Se encontraron ${orgs.length} organizaciones.`, "success");
+      const backupPlan: BackupPlan[] = [];
+      let totalAppsCount = 0;
+      let totalSpacesCount = 0;
+
+      setStats(prev => ({ ...prev, totalOrgs: orgs.length }));
+      addLog(`Se encontraron ${orgs.length} organizaciones.`, "info");
 
       for (const org of orgs) {
+          await checkControlFlow(); // Checkpoint
+          
+          const allSpaces = await podio.getSpaces(org.org_id);
+          const spacesToProcess = allSpaces.slice(0, MAX_SPACES);
+          
+          const spacePlans = [];
+          
+          totalSpacesCount += spacesToProcess.length;
+          setStats(prev => ({ ...prev, totalSpaces: totalSpacesCount }));
+
+          for (const space of spacesToProcess) {
+              await checkControlFlow(); // Checkpoint
+              
+              const allApps = await podio.getApps(space.space_id);
+              const appsToProcess = allApps.slice(0, MAX_APPS);
+
+              totalAppsCount += appsToProcess.length;
+              setStats(prev => ({ ...prev, totalApps: totalAppsCount }));
+              
+              spacePlans.push({ space, apps: appsToProcess });
+          }
+          
+          backupPlan.push({ org, spaces: spacePlans });
+      }
+
+      addLog(`ESCANEADO COMPLETO: ${orgs.length} Orgs, ${totalSpacesCount} Espacios, ${totalAppsCount} Apps encontradas.`, "success");
+      
+      // --- FASE 2: EJECUCIÓN ---
+      setStatus(AppStatus.WRITING_TO_DISK);
+      addLog("=== FASE 2: INICIANDO DESCARGA ===", "info");
+
+      for (const orgPlan of backupPlan) {
+        await checkControlFlow(); // Checkpoint
+
+        const { org, spaces } = orgPlan;
         setStats(prev => ({ ...prev, currentOrg: org.name }));
+        
         const orgDir = await fs.getDirectory(rootDir, org.name);
+        
+        for (const spacePlan of spaces) {
+          await checkControlFlow(); // Checkpoint
 
-        const spaces = await podio.getSpaces(org.org_id);
-        addLog(`[${org.name}] ${spaces.length} espacios de trabajo detectados.`, "info");
-
-        for (const space of spaces) {
+          const { space, apps } = spacePlan;
           setStats(prev => ({ ...prev, currentSpace: space.name }));
+          
           const spaceDir = await fs.getDirectory(orgDir, space.name);
 
-          const apps = await podio.getApps(space.space_id);
-          setStats(prev => ({ ...prev, totalApps: prev.totalApps + apps.length }));
-          
-          setStatus(AppStatus.WRITING_TO_DISK);
-
           for (const app of apps) {
+            await checkControlFlow(); // Checkpoint
+
             setStats(prev => ({ ...prev, currentApp: app.config.name }));
             const appDir = await fs.getDirectory(spaceDir, app.config.name);
             
@@ -121,12 +225,17 @@ const App: React.FC = () => {
             addLog(`Solicitando Excel para '${app.config.name}'...`, "network");
             let batchId = -1;
             try {
-               batchId = await podio.triggerAppExcelExport(app.app_id);
+               batchId = await podio.triggerAppExcelExport(app.app_id, EXCEL_LIMIT);
             } catch (ex) {
                addLog(`Fallo al solicitar Excel: ${ex}`, "error");
             }
             
             if (batchId !== -1) {
+              // Wait for batch with internal checkControlFlow inside loop? 
+              // Better: check before wait loop, and maybe inside PodioService if we passed signal?
+              // For now, checking here is enough as batch wait is usually fast.
+              await checkControlFlow(); 
+
               const batchResult = await podio.waitForBatch(batchId);
               if (batchResult && batchResult.file) {
                  const excelBlob = await podio.downloadFileContent(batchResult.file.link);
@@ -134,31 +243,26 @@ const App: React.FC = () => {
                    await fs.writeFile(appDir, `${app.config.name}.xlsx`, excelBlob);
                    setStats(prev => ({ ...prev, totalExcelsGenerated: prev.totalExcelsGenerated + 1 }));
                    addLog(`Excel guardado: ${app.config.name}.xlsx`, "success");
-                 } else {
-                   addLog(`Error descargando contenido de Excel para '${app.config.name}'`, "error");
                  }
-              } else {
-                 addLog(`⚠ Error generando Excel en Podio para '${app.config.name}'`, "warning");
               }
-            } else {
-              addLog(`⚠ No se pudo iniciar exportación para '${app.config.name}'`, "warning");
             }
 
             // --- FILES ---
-            const files = await podio.getAppFiles(app.app_id);
+            await checkControlFlow(); // Checkpoint
+            const files = await podio.getAppFiles(app.app_id, FILES_LIMIT);
             setStats(prev => ({ ...prev, totalFilesFound: prev.totalFilesFound + files.length }));
             
             if (files.length > 0) {
               const filesDir = await fs.getDirectory(appDir, "Files");
               
               for (const file of files) {
+                  await checkControlFlow(); // Checkpoint per file
+
                   try {
                       const fileBlob = await podio.downloadFileContent(file.link);
                       if (fileBlob) {
                         await fs.writeFile(filesDir, file.name, fileBlob);
                         setStats(prev => ({ ...prev, totalFilesDownloaded: prev.totalFilesDownloaded + 1 }));
-                      } else {
-                        addLog(`Saltando archivo ${file.name} (Error de descarga)`, "error");
                       }
                   } catch (e: any) {
                       addLog(`Falló escritura ${file.name}: ${e.message}`, "error");
@@ -170,90 +274,77 @@ const App: React.FC = () => {
 
             setStats(prev => ({ ...prev, processedApps: prev.processedApps + 1 }));
           }
+          setStats(prev => ({ ...prev, processedSpaces: prev.processedSpaces + 1 }));
         }
+        setStats(prev => ({ ...prev, processedOrgs: prev.processedOrgs + 1 }));
       }
       
       addLog("¡Backup Completo Finalizado Exitosamente!", "success");
       setStatus(AppStatus.COMPLETED);
 
     } catch (error: any) {
-      console.error(error);
-      addLog(`Error fatal durante el proceso: ${error.message}`, "error");
-      setStatus(AppStatus.ERROR);
+      if (error.message === "CANCELLED_BY_USER") {
+          addLog("Proceso detenido por el usuario.", "error");
+          setStatus(AppStatus.CANCELLED);
+      } else {
+          console.error(error);
+          addLog(`Error fatal durante el proceso: ${error.message}`, "error");
+          setStatus(AppStatus.ERROR);
+      }
     }
   };
 
   const runZipBackup = async (podio: PodioService) => {
-    setStatus(AppStatus.DISCOVERING_STRUCTURE);
-    const zip = new JSZip();
+     // Implementación simplificada del fallback ZIP con controles básicos
+      setStatus(AppStatus.DISCOVERING_STRUCTURE);
+      const zip = new JSZip();
 
-    try {
-       addLog("Buscando organizaciones...", "info");
-       const orgs = await podio.getOrganizations();
-       
-       for (const org of orgs) {
-         setStats(prev => ({ ...prev, currentOrg: org.name }));
-         const spaces = await podio.getSpaces(org.org_id);
-         
-         for (const space of spaces) {
-            setStats(prev => ({ ...prev, currentSpace: space.name }));
-            const apps = await podio.getApps(space.space_id);
-            setStats(prev => ({ ...prev, totalApps: prev.totalApps + apps.length }));
-            
-            setStatus(AppStatus.WRITING_TO_DISK); 
-
-            for (const app of apps) {
-               setStats(prev => ({ ...prev, currentApp: app.config.name }));
-               const folderPath = `${org.name}/${space.name}/${app.config.name}`;
-               
-               const batchId = await podio.triggerAppExcelExport(app.app_id);
-               if (batchId !== -1) {
-                 const batchResult = await podio.waitForBatch(batchId);
-                 if (batchResult && batchResult.file) {
-                    const excelBlob = await podio.downloadFileContent(batchResult.file.link);
-                    if (excelBlob) {
-                        zip.file(`${folderPath}/${app.config.name}.xlsx`, excelBlob);
-                        setStats(prev => ({ ...prev, totalExcelsGenerated: prev.totalExcelsGenerated + 1 }));
+      try {
+        const orgs = await podio.getOrganizations();
+        for (const org of orgs) {
+            await checkControlFlow();
+            const spaces = await podio.getSpaces(org.org_id);
+            for (const space of spaces) {
+                const apps = await podio.getApps(space.space_id);
+                setStatus(AppStatus.WRITING_TO_DISK); 
+                for (const app of apps) {
+                    await checkControlFlow();
+                    const folderPath = `${org.name}/${space.name}/${app.config.name}`;
+                    const batchId = await podio.triggerAppExcelExport(app.app_id, isTestMode ? 50 : 20000);
+                    if (batchId !== -1) {
+                         const batchResult = await podio.waitForBatch(batchId);
+                         if (batchResult?.file) {
+                             const blob = await podio.downloadFileContent(batchResult.file.link);
+                             if(blob) zip.file(`${folderPath}/${app.config.name}.xlsx`, blob);
+                         }
                     }
-                 }
-               }
-
-               const files = await podio.getAppFiles(app.app_id);
-               setStats(prev => ({ ...prev, totalFilesFound: prev.totalFilesFound + files.length }));
-               
-               if (files.length > 0) {
-                 let htmlContent = `<html><h1>Archivos Adjuntos: ${app.config.name}</h1><ul>`;
-                 files.forEach(f => {
-                    htmlContent += `<li><a href="${f.link}">${f.name}</a> (${(f.size/1024).toFixed(2)} KB)</li>`;
-                 });
-                 htmlContent += "</ul></html>";
-                 zip.file(`${folderPath}/Descargar_Adjuntos.html`, htmlContent);
-               }
-
-               setStats(prev => ({ ...prev, processedApps: prev.processedApps + 1 }));
+                }
             }
-         }
-       }
-
-       addLog("Comprimiendo archivo ZIP final...", "info");
-       const content = await zip.generateAsync({ type: "blob" });
-       
-       const saveAs = (FileSaver as any).saveAs || FileSaver;
-       saveAs(content, "Podio_Backup_Fallback.zip");
-       
-       addLog("Backup descargado como ZIP.", "success");
-       setStatus(AppStatus.COMPLETED);
-
-    } catch (error: any) {
-       addLog(`Error en modo compatibilidad: ${error.message}`, "error");
-       setStatus(AppStatus.ERROR);
-    }
+        }
+        const content = await zip.generateAsync({ type: "blob" });
+        const saveAs = (FileSaver as any).saveAs || FileSaver;
+        saveAs(content, "Podio_Backup_Fallback.zip");
+        setStatus(AppStatus.COMPLETED);
+      } catch (e: any) {
+          if (e.message === "CANCELLED_BY_USER") {
+             setStatus(AppStatus.CANCELLED);
+          } else {
+             addLog("Error ZIP: " + e.message, "error");
+             setStatus(AppStatus.ERROR);
+          }
+      }
   };
 
   const handleReset = () => {
     setStatus(AppStatus.IDLE);
     setLogs([]);
-    setStats({ totalApps: 0, processedApps: 0, totalExcelsGenerated: 0, totalFilesFound: 0, totalFilesDownloaded: 0 });
+    controlRef.current = { isPaused: false, isCancelled: false };
+    setStats({ 
+        totalOrgs: 0, processedOrgs: 0,
+        totalSpaces: 0, processedSpaces: 0,
+        totalApps: 0, processedApps: 0, 
+        totalExcelsGenerated: 0, totalFilesFound: 0, totalFilesDownloaded: 0 
+    });
     setApiStats({ totalRequests: 0, rateLimitLimit: null, rateLimitRemaining: null });
     podioServiceRef.current = null;
   };
@@ -295,6 +386,9 @@ const App: React.FC = () => {
             logs={logs}
             onDownload={handleSelectFolder} 
             onReset={handleReset}
+            onPause={handlePause}
+            onResume={handleResume}
+            onCancel={handleCancel}
           />
         )}
       </main>

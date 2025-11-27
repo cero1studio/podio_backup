@@ -13,6 +13,7 @@ export const CredentialsForm: React.FC<Props> = ({ onSubmit, isLoading }) => {
   const [password, setPassword] = useState('');
   const [rememberMe, setRememberMe] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+  const [isTestMode, setIsTestMode] = useState(false);
 
   useEffect(() => {
     const saved = localStorage.getItem('podio_creds_backup');
@@ -40,7 +41,7 @@ export const CredentialsForm: React.FC<Props> = ({ onSubmit, isLoading }) => {
         localStorage.removeItem('podio_creds_backup');
       }
       // El proxy ya está configurado en vite.config.ts, no necesitamos lógica extra
-      onSubmit({ clientId, clientSecret, username, password, useProxy: false });
+      onSubmit({ clientId, clientSecret, username, password, useProxy: false, isTestMode });
     }
   };
 
@@ -112,14 +113,26 @@ export const CredentialsForm: React.FC<Props> = ({ onSubmit, isLoading }) => {
           </div>
         </div>
 
-        <div className="flex items-center gap-2 text-xs text-gray-600">
-            <input 
-              type="checkbox" 
-              checked={rememberMe}
-              onChange={(e) => setRememberMe(e.target.checked)}
-              className="rounded text-indigo-600 focus:ring-indigo-500"
-            />
-            Recordar datos
+        <div className="flex items-center justify-between gap-2 text-xs text-gray-600 border-t border-b border-gray-100 py-3">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input 
+                type="checkbox" 
+                checked={rememberMe}
+                onChange={(e) => setRememberMe(e.target.checked)}
+                className="rounded text-indigo-600 focus:ring-indigo-500"
+              />
+              Recordar datos
+            </label>
+
+            <label className="flex items-center gap-2 cursor-pointer bg-yellow-50 px-2 py-1 rounded border border-yellow-200">
+              <input 
+                type="checkbox" 
+                checked={isTestMode}
+                onChange={(e) => setIsTestMode(e.target.checked)}
+                className="rounded text-yellow-600 focus:ring-yellow-500"
+              />
+              <span className="font-bold text-yellow-700">Modo Test (Rápido)</span>
+            </label>
         </div>
 
         <button
