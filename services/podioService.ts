@@ -1,7 +1,8 @@
 import { PodioGlobalCredentials, PodioOrg, PodioSpace, PodioApp, PodioBatch, PodioFile, ApiStats } from '../types';
 
-const BASE_URL = 'https://api.podio.com';
-const PROXY_URL = 'https://corsproxy.io/?';
+// USAMOS RUTAS RELATIVAS PARA QUE EL PROXY DE VITE (vite.config.ts) INTERCEPTE LAS LLAMADAS
+const API_PREFIX = '/podio-api';
+const FILES_PREFIX = '/podio-files';
 
 type ApiStatsCallback = (stats: ApiStats) => void;
 type LogCallback = (msg: string) => void;
@@ -26,18 +27,24 @@ export class PodioService {
   }
 
   /**
-   * Wrapper centralizado para todas las peticiones a Podio.
-   * Maneja Auth Headers, Conteo de Peticiones, Rate Limits y PROXY.
+   * Convierte una URL absoluta de Podio en una URL relativa que pase por nuestro Proxy local.
    */
-  private async request(endpoint: string, options: RequestInit = {}, isFullUrl = false): Promise<Response> {
-    let targetUrl = isFullUrl ? endpoint : `${BASE_URL}${endpoint}`;
-    
-    // Si usamos proxy, envolvemos la URL
-    if (this.credentials.useProxy) {
-      targetUrl = `${PROXY_URL}${encodeURIComponent(targetUrl)}`;
+  private proxifyUrl(url: string): string {
+    if (url.includes('api.podio.com')) {
+      return url.replace('https://api.podio.com', API_PREFIX);
     }
+    if (url.includes('files.podio.com')) {
+      return url.replace('https://files.podio.com', FILES_PREFIX);
+    }
+    // Si ya es relativa o desconocida, la dejamos (o intentamos pasarla por api)
+    if (url.startsWith('http')) return url; 
+    return `${API_PREFIX}${url.startsWith('/') ? '' : '/'}${url}`;
+  }
 
-    // Headers por defecto
+  private async request(endpoint: string, options: RequestInit = {}, isFullUrl = false): Promise<Response> {
+    // Calcular URL final usando el Proxy Local
+    let targetUrl = isFullUrl ? this.proxifyUrl(endpoint) : `${API_PREFIX}${endpoint}`;
+
     const headers: any = {
       'Accept': 'application/json',
       ...options.headers
@@ -51,18 +58,17 @@ export class PodioService {
       headers['Content-Type'] = 'application/json';
     }
 
-    // Logging
+    // Logging para debug visual
     this.requestCount++;
     if (this.onNetworkLog) {
       const method = options.method || 'GET';
-      const shortUrl = isFullUrl ? (endpoint.length > 50 ? '...' + endpoint.substring(endpoint.length - 50) : endpoint) : endpoint; 
-      this.onNetworkLog(`[API] ${method} ${shortUrl}`);
+      const logUrl = targetUrl.length > 60 ? '...' + targetUrl.slice(-60) : targetUrl;
+      this.onNetworkLog(`[PROXY] ${method} ${logUrl}`);
     }
 
     try {
       const response = await fetch(targetUrl, { ...options, headers });
 
-      // Leer Rate Limits (A veces el proxy se come los headers, pero intentamos leerlos)
       const limit = response.headers.get('X-Rate-Limit-Limit');
       const remaining = response.headers.get('X-Rate-Limit-Remaining');
 
@@ -75,11 +81,11 @@ export class PodioService {
       }
 
       if (response.status === 401) {
-        throw new Error("Token expirado o inválido (401).");
+        throw new Error("Token expirado o credenciales inválidas (401).");
       }
       
       if (response.status === 429) {
-         throw new Error("Rate Limit Excedido (429). Esperando a Podio...");
+         throw new Error("Has excedido el límite de Podio (429). Espera unos minutos.");
       }
 
       return response;
@@ -97,16 +103,8 @@ export class PodioService {
     params.append('password', this.credentials.password);
 
     try {
-      // Endpoint de autenticación
-      let authUrl = `${BASE_URL}/oauth/token`;
-      
-      // Aplicar Proxy si es necesario
-      if (this.credentials.useProxy) {
-        authUrl = `${PROXY_URL}${encodeURIComponent(authUrl)}`;
-      }
-
-      this.requestCount++;
-      const response = await fetch(authUrl, {
+      // POST a /podio-api/oauth/token
+      const response = await fetch(`${API_PREFIX}/oauth/token`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: params
@@ -114,7 +112,7 @@ export class PodioService {
 
       if (!response.ok) {
         const err = await response.json().catch(() => ({ error_description: response.statusText }));
-        throw new Error(`Authentication failed: ${err.error_description || response.statusText}`);
+        throw new Error(`Auth Falló: ${err.error_description || response.statusText}`);
       }
 
       const data = await response.json();
@@ -128,23 +126,21 @@ export class PodioService {
 
   async getOrganizations(): Promise<PodioOrg[]> {
     const response = await this.request('/org/');
-    if (!response.ok) throw new Error("Failed to fetch organizations");
+    if (!response.ok) throw new Error(`Error al obtener organizaciones: ${response.status}`);
     return await response.json();
   }
 
   async getSpaces(orgId: number): Promise<PodioSpace[]> {
     const response = await this.request(`/org/${orgId}/space/`);
-    if (!response.ok) throw new Error("Failed to fetch spaces");
+    if (!response.ok) throw new Error(`Error al obtener espacios: ${response.status}`);
     return await response.json();
   }
 
   async getApps(spaceId: number): Promise<PodioApp[]> {
     const response = await this.request(`/app/space/${spaceId}/`);
-    if (!response.ok) throw new Error("Failed to fetch apps");
+    if (!response.ok) throw new Error(`Error al obtener apps: ${response.status}`);
     return await response.json();
   }
-
-  // --- MÉTODOS BATCH OPTIMIZADOS ---
 
   async triggerAppExcelExport(appId: number): Promise<number> {
     try {
@@ -154,7 +150,7 @@ export class PodioService {
       });
       
       if (!response.ok) {
-        console.warn(`Error iniciando exportación para app ${appId}: ${response.status}`);
+        console.warn(`Excel Export Start Failed: ${response.status}`);
         return -1;
       }
       
@@ -168,7 +164,7 @@ export class PodioService {
 
   async waitForBatch(batchId: number): Promise<PodioBatch | null> {
     let attempts = 0;
-    const maxAttempts = 30; 
+    const maxAttempts = 60; // Esperar hasta 2 minutos
     
     while (attempts < maxAttempts) {
       const response = await this.request(`/batch/${batchId}`);
@@ -179,7 +175,7 @@ export class PodioService {
       if (batch.status === 'completed') {
         return batch;
       } else if (batch.status === 'failed') {
-        throw new Error("Batch export failed on Podio side");
+        throw new Error("La generación del Excel falló en los servidores de Podio.");
       }
 
       await new Promise(resolve => setTimeout(resolve, 2000));
@@ -216,16 +212,17 @@ export class PodioService {
   }
 
   async downloadFileContent(link: string): Promise<Blob | null> {
-    // Usamos isFullUrl = true porque 'link' viene completo de Podio
+    // link suele ser "https://files.podio.com/..."
+    // request() usará proxifyUrl para convertirlo en "/podio-files/..."
     try {
       const response = await this.request(link, {}, true);
       if (!response.ok) {
-        console.warn(`Error descargando archivo ${link}: ${response.status}`);
+        console.warn(`Download Failed (${response.status}): ${link}`);
         return null;
       }
       return await response.blob();
     } catch (e) {
-      console.warn(`Excepción descargando archivo ${link}:`, e);
+      console.warn(`Download Exception:`, e);
       return null;
     }
   }
