@@ -24,7 +24,6 @@ const App: React.FC = () => {
     rateLimitRemaining: null
   });
   
-  // Mantener la instancia del servicio activa entre renders
   const podioServiceRef = useRef<PodioService | null>(null);
 
   const addLog = useCallback((message: string, type: ProcessLog['type'] = 'info') => {
@@ -42,9 +41,8 @@ const App: React.FC = () => {
     setApiStats({ totalRequests: 0, rateLimitLimit: null, rateLimitRemaining: null });
     
     addLog(`Iniciando conexión con usuario: ${creds.username}...`, "info");
-    if(creds.useProxy) addLog("Modo Proxy activado. (Lento e inestable para archivos grandes)", "warning");
+    addLog("Usando Vite Local Proxy para máximo rendimiento.", "success");
     
-    // Instanciar y guardar en ref
     const podioService = new PodioService(
         creds,
         (newApiStats) => setApiStats(newApiStats),
@@ -57,16 +55,10 @@ const App: React.FC = () => {
       addLog("¡Conexión establecida correctamente! Token recibido.", "success");
       addLog("Esperando selección de carpeta de destino...", "info");
       
-      // CAMBIO IMPORTANTE: No llamamos a selectDirectory aquí.
-      // Cambiamos el estado para mostrar el botón de selección manual.
       setStatus(AppStatus.READY_TO_BACKUP);
 
     } catch (error: any) {
       addLog(`Error de Conexión: ${error.message}`, "error");
-      if (error.message.includes("Failed to fetch") && !creds.useProxy) {
-         addLog("TIP: ¿Tienes activada la extensión 'Allow CORS'? Es obligatoria para conexión directa.", "warning");
-      }
-      // Volver a IDLE tras error para permitir reintento
       setTimeout(() => setStatus(AppStatus.IDLE), 3000);
     }
   };
@@ -78,24 +70,21 @@ const App: React.FC = () => {
     const fsService = new FileSystemService();
     
     try {
-      // Intentar acceso directo al disco
       const rootDirHandle = await fsService.selectDirectory();
       addLog("Carpeta seleccionada correctamente. Iniciando escaneo...", "success");
       await runDiskBackup(podioServiceRef.current, fsService, rootDirHandle);
     } catch (err: any) {
-      // Si falla por CORS/Iframe (Cross origin sub frames...), fallback a ZIP
       if (err.message && (err.message.includes('Cross origin') || err.message.includes('security'))) {
-        addLog("! Detectado bloqueo de seguridad del navegador (Iframe).", "warning");
-        addLog(">>> Cambiando a MODO COMPATIBILIDAD (ZIP en Memoria)...", "info");
+        addLog("! Detectado bloqueo de seguridad del navegador.", "warning");
+        addLog(">>> Cambiando a MODO ZIP (Fallback)...", "info");
         await runZipBackup(podioServiceRef.current);
       } else {
         addLog(`Selección de carpeta cancelada: ${err.message}`, "warning");
-        setStatus(AppStatus.READY_TO_BACKUP); // Volver al paso anterior
+        setStatus(AppStatus.READY_TO_BACKUP);
       }
     }
   };
 
-  // --- MODO DISCO DURO (PREFERIDO) ---
   const runDiskBackup = async (
     podio: PodioService, 
     fs: FileSystemService, 
@@ -152,7 +141,7 @@ const App: React.FC = () => {
                  addLog(`⚠ Error generando Excel en Podio para '${app.config.name}'`, "warning");
               }
             } else {
-              addLog(`⚠ No se pudo iniciar exportación para '${app.config.name}' (Posible 404/Proxy)`, "warning");
+              addLog(`⚠ No se pudo iniciar exportación para '${app.config.name}'`, "warning");
             }
 
             // --- FILES ---
@@ -160,12 +149,10 @@ const App: React.FC = () => {
             setStats(prev => ({ ...prev, totalFilesFound: prev.totalFilesFound + files.length }));
             
             if (files.length > 0) {
-              addLog(`Encontrados ${files.length} adjuntos en '${app.config.name}'.`, "info");
               const filesDir = await fs.getDirectory(appDir, "Files");
               
               for (const file of files) {
                   try {
-                      // Descargar con robustez
                       const fileBlob = await podio.downloadFileContent(file.link);
                       if (fileBlob) {
                         await fs.writeFile(filesDir, file.name, fileBlob);
@@ -177,7 +164,6 @@ const App: React.FC = () => {
                       addLog(`Falló escritura ${file.name}: ${e.message}`, "error");
                   }
               }
-
               const metadata = JSON.stringify(files, null, 2);
               await fs.writeFile(appDir, "_files_metadata.json", metadata);
             }
@@ -197,7 +183,6 @@ const App: React.FC = () => {
     }
   };
 
-  // --- MODO FALLBACK (ZIP EN MEMORIA) ---
   const runZipBackup = async (podio: PodioService) => {
     setStatus(AppStatus.DISCOVERING_STRUCTURE);
     const zip = new JSZip();
@@ -215,13 +200,12 @@ const App: React.FC = () => {
             const apps = await podio.getApps(space.space_id);
             setStats(prev => ({ ...prev, totalApps: prev.totalApps + apps.length }));
             
-            setStatus(AppStatus.WRITING_TO_DISK); // Reusamos estado para indicar progreso
+            setStatus(AppStatus.WRITING_TO_DISK); 
 
             for (const app of apps) {
                setStats(prev => ({ ...prev, currentApp: app.config.name }));
                const folderPath = `${org.name}/${space.name}/${app.config.name}`;
                
-               // Excel
                const batchId = await podio.triggerAppExcelExport(app.app_id);
                if (batchId !== -1) {
                  const batchResult = await podio.waitForBatch(batchId);
@@ -234,7 +218,6 @@ const App: React.FC = () => {
                  }
                }
 
-               // Files List (No binary download to avoid crash)
                const files = await podio.getAppFiles(app.app_id);
                setStats(prev => ({ ...prev, totalFilesFound: prev.totalFilesFound + files.length }));
                
@@ -245,7 +228,6 @@ const App: React.FC = () => {
                  });
                  htmlContent += "</ul></html>";
                  zip.file(`${folderPath}/Descargar_Adjuntos.html`, htmlContent);
-                 addLog(`Generado índice de ${files.length} archivos para '${app.config.name}'`, "info");
                }
 
                setStats(prev => ({ ...prev, processedApps: prev.processedApps + 1 }));
@@ -256,9 +238,8 @@ const App: React.FC = () => {
        addLog("Comprimiendo archivo ZIP final...", "info");
        const content = await zip.generateAsync({ type: "blob" });
        
-       // Handle file-saver import differences
        const saveAs = (FileSaver as any).saveAs || FileSaver;
-       saveAs(content, "Podio_Backup_Compatibility.zip");
+       saveAs(content, "Podio_Backup_Fallback.zip");
        
        addLog("Backup descargado como ZIP.", "success");
        setStatus(AppStatus.COMPLETED);

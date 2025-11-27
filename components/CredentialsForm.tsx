@@ -39,7 +39,7 @@ export const CredentialsForm: React.FC<Props> = ({ onSubmit, isLoading }) => {
       } else {
         localStorage.removeItem('podio_creds_backup');
       }
-      // useProxy siempre false, ya que usamos el proxy interno de Vite
+      // El proxy ya está configurado en vite.config.ts, no necesitamos lógica extra
       onSubmit({ clientId, clientSecret, username, password, useProxy: false });
     }
   };
@@ -47,13 +47,13 @@ export const CredentialsForm: React.FC<Props> = ({ onSubmit, isLoading }) => {
   return (
     <div className="bg-white p-8 rounded-xl shadow-lg w-full max-w-md border border-gray-100">
       <div className="text-center mb-6">
-        <div className="bg-indigo-100 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4">
-          <i className="fa-solid fa-server text-indigo-600 text-2xl"></i>
+        <div className="bg-green-100 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4">
+          <i className="fa-solid fa-laptop-code text-green-600 text-2xl"></i>
         </div>
         <h2 className="text-2xl font-bold text-gray-800">Podio Local Backup</h2>
         <p className="text-xs text-gray-500 mt-2">
-          Conexión segura a través de Proxy Local (Vite).<br/>
-          <span className="text-green-600 font-semibold">CORS Solucionado.</span>
+          Entorno Local Optimizado (Vite Proxy).<br/>
+          <span className="text-indigo-600 font-semibold">Listo para descargas masivas.</span>
         </p>
       </div>
 

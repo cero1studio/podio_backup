@@ -5,24 +5,22 @@ import react from '@vitejs/plugin-react'
 export default defineConfig({
   plugins: [react()],
   server: {
+    port: 3000,
     proxy: {
-      // Redirige llamadas de API /podio-api -> https://api.podio.com
+      // Intercepta llamadas a /podio-api y las manda a api.podio.com "engañando" al navegador
       '/podio-api': {
         target: 'https://api.podio.com',
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/podio-api/, ''),
         secure: false,
         configure: (proxy, _options) => {
-          proxy.on('error', (err, _req, _res) => {
-            console.log('proxy error', err);
-          });
           proxy.on('proxyReq', (proxyReq, req, _res) => {
-            // Eliminar origen para evitar rechazo de Podio
+            // Importante: Podio verifica el Origin
             proxyReq.setHeader('Origin', 'https://podio.com');
           });
         },
       },
-      // Redirige descargas de archivos /podio-files -> https://files.podio.com
+      // Intercepta descargas de /podio-files y las manda a files.podio.com
       '/podio-files': {
         target: 'https://files.podio.com',
         changeOrigin: true,
