@@ -127,13 +127,16 @@ const App: React.FC = () => {
     
     try {
       const rootDirHandle = await fsService.selectDirectory();
-      addLog("Carpeta seleccionada correctamente. Iniciando análisis de estructura...", "success");
+      addLog("Carpeta seleccionada con permisos de escritura. Iniciando backup...", "success");
       await runDiskBackup(podioServiceRef.current, fsService, rootDirHandle);
     } catch (err: any) {
       if (err.message && (err.message.includes('Cross origin') || err.message.includes('security'))) {
-        addLog("! Detectado bloqueo de seguridad del navegador.", "warning");
+        addLog("! Detectado bloqueo de seguridad del navegador (Iframe).", "warning");
         addLog(">>> Cambiando a MODO ZIP (Fallback)...", "info");
         await runZipBackup(podioServiceRef.current);
+      } else if (err.message.includes("User activation") || err.message.includes("permisos")) {
+        addLog("ERROR DE PERMISOS: Debes conceder permisos de EDICIÓN/ESCRITURA en la ventana emergente del navegador.", "error");
+        setStatus(AppStatus.READY_TO_BACKUP);
       } else {
         addLog(`Selección de carpeta cancelada: ${err.message}`, "warning");
         setStatus(AppStatus.READY_TO_BACKUP);
@@ -205,7 +208,13 @@ const App: React.FC = () => {
         const { org, spaces } = orgPlan;
         setStats(prev => ({ ...prev, currentOrg: org.name }));
         
-        const orgDir = await fs.getDirectory(rootDir, org.name);
+        // Aquí verificamos permisos implícitamente al intentar crear directorio
+        let orgDir: FileSystemDirectoryHandle;
+        try {
+             orgDir = await fs.getDirectory(rootDir, org.name);
+        } catch (e: any) {
+             throw new Error(`No se pudo crear carpeta para Organización ${org.name}. Verifica permisos de escritura. Error: ${e.message}`);
+        }
         
         for (const spacePlan of spaces) {
           await checkControlFlow(); // Checkpoint
@@ -231,9 +240,6 @@ const App: React.FC = () => {
             }
             
             if (batchId !== -1) {
-              // Wait for batch with internal checkControlFlow inside loop? 
-              // Better: check before wait loop, and maybe inside PodioService if we passed signal?
-              // For now, checking here is enough as batch wait is usually fast.
               await checkControlFlow(); 
 
               const batchResult = await podio.waitForBatch(batchId);
@@ -295,7 +301,7 @@ const App: React.FC = () => {
   };
 
   const runZipBackup = async (podio: PodioService) => {
-     // Implementación simplificada del fallback ZIP con controles básicos
+      // Fallback ZIP en memoria (sin FileSystemAccess)
       setStatus(AppStatus.DISCOVERING_STRUCTURE);
       const zip = new JSZip();
 
@@ -310,6 +316,8 @@ const App: React.FC = () => {
                 for (const app of apps) {
                     await checkControlFlow();
                     const folderPath = `${org.name}/${space.name}/${app.config.name}`;
+                    
+                    // Solo descargamos Excel en modo ZIP para no explotar la memoria
                     const batchId = await podio.triggerAppExcelExport(app.app_id, isTestMode ? 50 : 20000);
                     if (batchId !== -1) {
                          const batchResult = await podio.waitForBatch(batchId);
