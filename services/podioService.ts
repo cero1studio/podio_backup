@@ -55,7 +55,7 @@ export class PodioService {
     this.requestCount++;
     if (this.onNetworkLog) {
       const method = options.method || 'GET';
-      const shortUrl = isFullUrl ? endpoint : endpoint; 
+      const shortUrl = isFullUrl ? (endpoint.length > 50 ? '...' + endpoint.substring(endpoint.length - 50) : endpoint) : endpoint; 
       this.onNetworkLog(`[API] ${method} ${shortUrl}`);
     }
 
@@ -147,18 +147,23 @@ export class PodioService {
   // --- MÉTODOS BATCH OPTIMIZADOS ---
 
   async triggerAppExcelExport(appId: number): Promise<number> {
-    const response = await this.request(`/app/${appId}/xlsx/`, {
-      method: 'POST',
-      body: JSON.stringify({ limit: 20000 })
-    });
-    
-    if (!response.ok) {
-      console.warn(`No se pudo iniciar exportación para app ${appId}`);
+    try {
+      const response = await this.request(`/app/${appId}/xlsx/`, {
+        method: 'POST',
+        body: JSON.stringify({ limit: 20000 })
+      });
+      
+      if (!response.ok) {
+        console.warn(`Error iniciando exportación para app ${appId}: ${response.status}`);
+        return -1;
+      }
+      
+      const data: PodioBatch = await response.json();
+      return data.batch_id;
+    } catch (e) {
+      console.error(`Excepción en triggerAppExcelExport:`, e);
       return -1;
     }
-    
-    const data: PodioBatch = await response.json();
-    return data.batch_id;
   }
 
   async waitForBatch(batchId: number): Promise<PodioBatch | null> {
@@ -189,28 +194,39 @@ export class PodioService {
     const limit = 100;
     let hasMore = true;
 
-    while (hasMore) {
-      const response = await this.request(`/file/app/${appId}/?limit=${limit}&offset=${offset}&sort_by=created_on`);
+    try {
+      while (hasMore) {
+        const response = await this.request(`/file/app/${appId}/?limit=${limit}&offset=${offset}&sort_by=created_on`);
 
-      if (!response.ok) break;
+        if (!response.ok) break;
 
-      const files: PodioFile[] = await response.json();
-      allFiles = [...allFiles, ...files];
+        const files: PodioFile[] = await response.json();
+        allFiles = [...allFiles, ...files];
 
-      if (files.length < limit) {
-        hasMore = false;
-      } else {
-        offset += limit;
+        if (files.length < limit) {
+          hasMore = false;
+        } else {
+          offset += limit;
+        }
       }
+    } catch (e) {
+      console.error("Error obteniendo lista de archivos:", e);
     }
     return allFiles;
   }
 
-  async downloadFileContent(link: string): Promise<Blob> {
+  async downloadFileContent(link: string): Promise<Blob | null> {
     // Usamos isFullUrl = true porque 'link' viene completo de Podio
-    // El método request() se encargará de ponerle el proxy si es necesario
-    const response = await this.request(link, {}, true);
-    if (!response.ok) throw new Error("Download failed");
-    return await response.blob();
+    try {
+      const response = await this.request(link, {}, true);
+      if (!response.ok) {
+        console.warn(`Error descargando archivo ${link}: ${response.status}`);
+        return null;
+      }
+      return await response.blob();
+    } catch (e) {
+      console.warn(`Excepción descargando archivo ${link}:`, e);
+      return null;
+    }
   }
 }

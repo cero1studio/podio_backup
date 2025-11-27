@@ -42,7 +42,7 @@ const App: React.FC = () => {
     setApiStats({ totalRequests: 0, rateLimitLimit: null, rateLimitRemaining: null });
     
     addLog(`Iniciando conexión con usuario: ${creds.username}...`, "info");
-    if(creds.useProxy) addLog("Modo Proxy activado para evitar bloqueos CORS.", "info");
+    if(creds.useProxy) addLog("Modo Proxy activado. (Lento e inestable para archivos grandes)", "warning");
     
     // Instanciar y guardar en ref
     const podioService = new PodioService(
@@ -64,7 +64,7 @@ const App: React.FC = () => {
     } catch (error: any) {
       addLog(`Error de Conexión: ${error.message}`, "error");
       if (error.message.includes("Failed to fetch") && !creds.useProxy) {
-         addLog("TIP: Activa la casilla 'Usar Proxy (CORS)' e intenta de nuevo.", "warning");
+         addLog("TIP: ¿Tienes activada la extensión 'Allow CORS'? Es obligatoria para conexión directa.", "warning");
       }
       // Volver a IDLE tras error para permitir reintento
       setTimeout(() => setStatus(AppStatus.IDLE), 3000);
@@ -130,20 +130,29 @@ const App: React.FC = () => {
             
             // --- EXCEL ---
             addLog(`Solicitando Excel para '${app.config.name}'...`, "network");
-            const batchId = await podio.triggerAppExcelExport(app.app_id);
+            let batchId = -1;
+            try {
+               batchId = await podio.triggerAppExcelExport(app.app_id);
+            } catch (ex) {
+               addLog(`Fallo al solicitar Excel: ${ex}`, "error");
+            }
             
             if (batchId !== -1) {
               const batchResult = await podio.waitForBatch(batchId);
               if (batchResult && batchResult.file) {
                  const excelBlob = await podio.downloadFileContent(batchResult.file.link);
-                 await fs.writeFile(appDir, `${app.config.name}.xlsx`, excelBlob);
-                 setStats(prev => ({ ...prev, totalExcelsGenerated: prev.totalExcelsGenerated + 1 }));
-                 addLog(`Excel guardado: ${app.config.name}.xlsx`, "success");
+                 if (excelBlob) {
+                   await fs.writeFile(appDir, `${app.config.name}.xlsx`, excelBlob);
+                   setStats(prev => ({ ...prev, totalExcelsGenerated: prev.totalExcelsGenerated + 1 }));
+                   addLog(`Excel guardado: ${app.config.name}.xlsx`, "success");
+                 } else {
+                   addLog(`Error descargando contenido de Excel para '${app.config.name}'`, "error");
+                 }
               } else {
-                 addLog(`⚠ Error en Excel para '${app.config.name}'`, "warning");
+                 addLog(`⚠ Error generando Excel en Podio para '${app.config.name}'`, "warning");
               }
             } else {
-              addLog(`⚠ App vacía o error al exportar '${app.config.name}'`, "warning");
+              addLog(`⚠ No se pudo iniciar exportación para '${app.config.name}' (Posible 404/Proxy)`, "warning");
             }
 
             // --- FILES ---
@@ -156,11 +165,16 @@ const App: React.FC = () => {
               
               for (const file of files) {
                   try {
+                      // Descargar con robustez
                       const fileBlob = await podio.downloadFileContent(file.link);
-                      await fs.writeFile(filesDir, file.name, fileBlob);
-                      setStats(prev => ({ ...prev, totalFilesDownloaded: prev.totalFilesDownloaded + 1 }));
+                      if (fileBlob) {
+                        await fs.writeFile(filesDir, file.name, fileBlob);
+                        setStats(prev => ({ ...prev, totalFilesDownloaded: prev.totalFilesDownloaded + 1 }));
+                      } else {
+                        addLog(`Saltando archivo ${file.name} (Error de descarga)`, "error");
+                      }
                   } catch (e: any) {
-                      addLog(`Falló descarga ${file.name}: ${e.message}`, "error");
+                      addLog(`Falló escritura ${file.name}: ${e.message}`, "error");
                   }
               }
 
@@ -213,8 +227,10 @@ const App: React.FC = () => {
                  const batchResult = await podio.waitForBatch(batchId);
                  if (batchResult && batchResult.file) {
                     const excelBlob = await podio.downloadFileContent(batchResult.file.link);
-                    zip.file(`${folderPath}/${app.config.name}.xlsx`, excelBlob);
-                    setStats(prev => ({ ...prev, totalExcelsGenerated: prev.totalExcelsGenerated + 1 }));
+                    if (excelBlob) {
+                        zip.file(`${folderPath}/${app.config.name}.xlsx`, excelBlob);
+                        setStats(prev => ({ ...prev, totalExcelsGenerated: prev.totalExcelsGenerated + 1 }));
+                    }
                  }
                }
 

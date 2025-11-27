@@ -11,7 +11,7 @@ export const CredentialsForm: React.FC<Props> = ({ onSubmit, isLoading }) => {
   const [clientSecret, setClientSecret] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
-  const [useProxy, setUseProxy] = useState(true);
+  const [useProxy, setUseProxy] = useState(false); // Default false para forzar uso de extensión en local
   const [rememberMe, setRememberMe] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
 
@@ -25,7 +25,7 @@ export const CredentialsForm: React.FC<Props> = ({ onSubmit, isLoading }) => {
         setClientSecret(parsed.clientSecret || '');
         setUsername(parsed.username || '');
         setPassword(parsed.password || '');
-        setUseProxy(parsed.useProxy ?? true);
+        setUseProxy(parsed.useProxy ?? false);
         setRememberMe(true);
       } catch (e) {
         console.error("Error cargando credenciales guardadas", e);
@@ -57,9 +57,14 @@ export const CredentialsForm: React.FC<Props> = ({ onSubmit, isLoading }) => {
           {useProxy && <div className="absolute top-0 right-0 w-4 h-4 bg-blue-500 rounded-full border-2 border-white" title="Proxy Activado"></div>}
         </div>
         <h2 className="text-2xl font-bold text-gray-800">Conectar a Podio</h2>
-        <p className="text-gray-500 mt-2 text-sm">
-          Introduce tus credenciales para escanear y respaldar tu organización.
-        </p>
+        
+        {/* Warning Box for CORS */}
+        <div className="mt-4 bg-yellow-50 border border-yellow-200 p-3 rounded-lg text-left">
+           <p className="text-[10px] text-yellow-800 font-semibold mb-1"><i className="fa-solid fa-triangle-exclamation"></i> IMPORTANTE (Localhost):</p>
+           <p className="text-[10px] text-yellow-700 leading-tight">
+             Para descargar archivos grandes y generar Excels sin errores, <strong>DESACTIVA el Proxy</strong> y usa la extensión de Chrome <span className="font-bold">"Allow CORS"</span>.
+           </p>
+        </div>
       </div>
 
       <form onSubmit={handleSubmit} className="space-y-4">
@@ -137,14 +142,14 @@ export const CredentialsForm: React.FC<Props> = ({ onSubmit, isLoading }) => {
               Recordar datos
            </label>
            
-           <label className="flex items-center cursor-pointer gap-2" title="Requerido para conectar desde navegador web">
+           <label className="flex items-center cursor-pointer gap-2" title="Requerido SOLO si no tienes extensión CORS">
               <input 
                 type="checkbox" 
                 checked={useProxy}
                 onChange={(e) => setUseProxy(e.target.checked)}
                 className="rounded text-blue-600 focus:ring-blue-500"
               />
-              <span className={useProxy ? 'text-blue-600 font-semibold' : ''}>Usar Proxy (CORS)</span>
+              <span className={useProxy ? 'text-blue-600 font-semibold' : ''}>Usar Proxy (Lento)</span>
            </label>
         </div>
 
@@ -166,8 +171,8 @@ export const CredentialsForm: React.FC<Props> = ({ onSubmit, isLoading }) => {
       <div className="mt-4 text-center">
          <p className="text-[10px] text-gray-400">
            {useProxy 
-             ? <span><i className="fa-solid fa-shield-halved text-blue-400"></i> Conexión enrutada vía corsproxy.io para evitar bloqueos de navegador.</span>
-             : <span><i className="fa-solid fa-triangle-exclamation text-yellow-500"></i> Proxy desactivado. Es probable que la conexión falle por CORS.</span>
+             ? <span><i className="fa-solid fa-shield-halved text-blue-400"></i> Proxy Activado. Puede fallar con archivos grandes o Excels.</span>
+             : <span><i className="fa-solid fa-bolt text-green-500"></i> Conexión Directa. Asegúrate de tener la extensión CORS activa.</span>
            }
          </p>
       </div>
