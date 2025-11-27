@@ -1,0 +1,5 @@
+{
+  "name": "Podio Backup Master",
+  "description": "Herramienta profesional para generar backups completos escribiendo directamente en disco duro (Organizaciones + Archivos Físicos).",
+  "requestFramePermissions": []
+}
