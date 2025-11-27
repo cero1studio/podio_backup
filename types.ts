@@ -30,6 +30,7 @@ export interface PodioApp {
     item_name: string;
     icon: string;
   };
+  item_count?: number; // Cantidad de items reportada por Podio
 }
 
 export interface PodioFile {
@@ -107,6 +108,8 @@ export interface BackupStats {
 
   totalApps: number;
   processedApps: number;
+
+  totalItems: number; // Nuevo: Suma de item_count de todas las apps
   
   // Archivos
   totalExcelsGenerated: number;

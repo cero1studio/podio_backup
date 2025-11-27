@@ -52,11 +52,11 @@ export const ProcessDashboard: React.FC<Props> = ({
     <div className="w-full max-w-6xl mx-auto space-y-6">
       
       {/* Header Stats Grid */}
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-6 gap-4">
         
         {/* Apps Progress */}
-        <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100">
-          <p className="text-xs text-gray-500 uppercase tracking-wide">Progreso Global</p>
+        <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 col-span-2">
+          <p className="text-xs text-gray-500 uppercase tracking-wide">Progreso Global (Apps)</p>
           <div className="flex items-end gap-2 mt-1">
             <span className="text-xl font-bold text-gray-800">{stats.processedApps}</span>
             <span className="text-xs text-gray-400 mb-1">/ {stats.totalApps} Apps</span>
@@ -72,34 +72,31 @@ export const ProcessDashboard: React.FC<Props> = ({
              <span>{stats.processedSpaces}/{stats.totalSpaces} Espacios</span>
           </div>
         </div>
+
+        {/* Item Count Stats */}
+        <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 col-span-1">
+           <p className="text-xs text-gray-500 uppercase tracking-wide">Total Items</p>
+           <div className="flex items-end gap-2 mt-2">
+             <i className="fa-solid fa-list-ol text-purple-200 text-3xl"></i>
+             <div className="flex flex-col">
+                 <span className="text-lg font-bold text-purple-600 leading-none">
+                     {stats.totalItems > 0 ? (stats.totalItems / 1000).toFixed(1) + 'k' : stats.totalItems}
+                 </span>
+                 <span className="text-[10px] text-gray-400">Registros</span>
+             </div>
+           </div>
+        </div>
         
         {/* File Stats */}
-        <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100">
-           <p className="text-xs text-gray-500 uppercase tracking-wide">Archivos Guardados</p>
+        <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 col-span-1">
+           <p className="text-xs text-gray-500 uppercase tracking-wide">Archivos</p>
            <div className="flex items-end gap-2 mt-1">
              <span className="text-xl font-bold text-green-600">{stats.totalFilesDownloaded}</span>
              <span className="text-xs text-gray-400 mb-1">/ {stats.totalFilesFound}</span>
            </div>
            <p className="text-[10px] text-gray-400 mt-2">
-              {stats.totalExcelsGenerated} Excels Generados
+              {stats.totalExcelsGenerated} Excels OK
            </p>
-        </div>
-
-        {/* Status */}
-        <div className={`bg-white p-4 rounded-xl shadow-sm border border-gray-100 border-l-4 ${isPaused ? 'border-l-orange-500' : 'border-l-indigo-500'}`}>
-          <p className="text-xs text-gray-500 uppercase tracking-wide">Estado Actual</p>
-          <p className="text-sm font-bold text-gray-800 mt-1 truncate">
-            {status === AppStatus.IDLE && 'Esperando'}
-            {status === AppStatus.AUTHENTICATING && 'Autenticando...'}
-            {status === AppStatus.READY_TO_BACKUP && 'Esperando Confirmación'}
-            {status === AppStatus.SELECTING_DIR && 'Selecciona Carpeta...'}
-            {status === AppStatus.DISCOVERING_STRUCTURE && <span className="text-yellow-600">Escaneando Estructura...</span>}
-            {status === AppStatus.WRITING_TO_DISK && <span className="text-blue-600">Descargando...</span>}
-            {status === AppStatus.PAUSED && <span className="text-orange-500 uppercase animate-pulse">❚❚ Pausado</span>}
-            {status === AppStatus.CANCELLED && <span className="text-red-500">Cancelado por usuario</span>}
-            {status === AppStatus.COMPLETED && <span className="text-green-600">¡Completado!</span>}
-            {status === AppStatus.ERROR && 'Error'}
-          </p>
         </div>
 
         {/* API Stats (Spans 2 cols on md) */}

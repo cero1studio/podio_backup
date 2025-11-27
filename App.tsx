@@ -17,6 +17,7 @@ const App: React.FC = () => {
     totalOrgs: 0, processedOrgs: 0,
     totalSpaces: 0, processedSpaces: 0,
     totalApps: 0, processedApps: 0,
+    totalItems: 0,
     totalExcelsGenerated: 0,
     totalFilesFound: 0,
     totalFilesDownloaded: 0
@@ -89,6 +90,7 @@ const App: React.FC = () => {
         totalOrgs: 0, processedOrgs: 0,
         totalSpaces: 0, processedSpaces: 0,
         totalApps: 0, processedApps: 0, 
+        totalItems: 0,
         totalExcelsGenerated: 0, totalFilesFound: 0, totalFilesDownloaded: 0 
     });
     setApiStats({ totalRequests: 0, rateLimitLimit: null, rateLimitRemaining: null });
@@ -96,7 +98,7 @@ const App: React.FC = () => {
     addLog(`Iniciando conexión con usuario: ${creds.username}...`, "info");
     addLog("Usando Vite Local Proxy para máximo rendimiento.", "success");
     if (creds.isTestMode) {
-        addLog("MODO TEST ACTIVADO: Se limitarán las descargas (5 Espacios, 10 Apps).", "warning");
+        addLog("MODO TEST ACTIVADO: Se limitará a 1 Espacio y parará al llegar a 10 archivos.", "warning");
     }
     
     const podioService = new PodioService(
@@ -153,10 +155,13 @@ const App: React.FC = () => {
     
     try {
       // Configuración de límites según modo Test
-      const MAX_SPACES = isTestMode ? 5 : 9999;
-      const MAX_APPS = isTestMode ? 10 : 9999;
+      const MAX_SPACES = isTestMode ? 1 : 9999;
+      // En modo test no limitamos apps, escaneamos hasta encontrar 10 archivos
+      const MAX_APPS = 9999; 
+      
       const EXCEL_LIMIT = isTestMode ? 50 : 20000;
-      const FILES_LIMIT = isTestMode ? 5 : 5000;
+      const FILES_LIMIT_PER_APP = isTestMode ? 10 : 5000; 
+      const GLOBAL_FILES_STOP_LIMIT = isTestMode ? 10 : 99999999;
 
       // --- FASE 1: DESCUBRIMIENTO ---
       addLog("=== FASE 1: ESCANEO DE ESTRUCTURA ===", "info");
@@ -166,6 +171,7 @@ const App: React.FC = () => {
       const backupPlan: BackupPlan[] = [];
       let totalAppsCount = 0;
       let totalSpacesCount = 0;
+      let totalItemsCount = 0;
 
       setStats(prev => ({ ...prev, totalOrgs: orgs.length }));
       addLog(`Se encontraron ${orgs.length} organizaciones.`, "info");
@@ -185,10 +191,22 @@ const App: React.FC = () => {
               await checkControlFlow(); // Checkpoint
               
               const allApps = await podio.getApps(space.space_id);
+              // Si es test mode, tomamos todas las apps de ese espacio, 
+              // pero pararemos en la Fase 2 cuando lleguemos a los 10 archivos.
               const appsToProcess = allApps.slice(0, MAX_APPS);
 
               totalAppsCount += appsToProcess.length;
-              setStats(prev => ({ ...prev, totalApps: totalAppsCount }));
+              
+              // Sumamos los items reportados por Podio (sin hacer llamadas extra)
+              appsToProcess.forEach(app => {
+                  totalItemsCount += (app.item_count || 0);
+              });
+
+              setStats(prev => ({ 
+                  ...prev, 
+                  totalApps: totalAppsCount,
+                  totalItems: totalItemsCount
+              }));
               
               spacePlans.push({ space, apps: appsToProcess });
           }
@@ -196,27 +214,35 @@ const App: React.FC = () => {
           backupPlan.push({ org, spaces: spacePlans });
       }
 
-      addLog(`ESCANEADO COMPLETO: ${orgs.length} Orgs, ${totalSpacesCount} Espacios, ${totalAppsCount} Apps encontradas.`, "success");
+      addLog(`ESCANEADO COMPLETO: ${totalItemsCount} Registros (Items) en ${totalAppsCount} Apps.`, "success");
       
       // --- FASE 2: EJECUCIÓN ---
       setStatus(AppStatus.WRITING_TO_DISK);
       addLog("=== FASE 2: INICIANDO DESCARGA ===", "info");
 
+      // Usamos una variable local para tracking rápido dentro de loops
+      let downloadedFilesGlobal = 0;
+
       for (const orgPlan of backupPlan) {
+        // BREAK DE MODO TEST
+        if (isTestMode && downloadedFilesGlobal >= GLOBAL_FILES_STOP_LIMIT) break;
+
         await checkControlFlow(); // Checkpoint
 
         const { org, spaces } = orgPlan;
         setStats(prev => ({ ...prev, currentOrg: org.name }));
         
-        // Aquí verificamos permisos implícitamente al intentar crear directorio
         let orgDir: FileSystemDirectoryHandle;
         try {
              orgDir = await fs.getDirectory(rootDir, org.name);
         } catch (e: any) {
-             throw new Error(`No se pudo crear carpeta para Organización ${org.name}. Verifica permisos de escritura. Error: ${e.message}`);
+             throw new Error(`No se pudo crear carpeta para Organización ${org.name}. Verifica permisos. Error: ${e.message}`);
         }
         
         for (const spacePlan of spaces) {
+          // BREAK DE MODO TEST
+          if (isTestMode && downloadedFilesGlobal >= GLOBAL_FILES_STOP_LIMIT) break;
+
           await checkControlFlow(); // Checkpoint
 
           const { space, apps } = spacePlan;
@@ -225,6 +251,12 @@ const App: React.FC = () => {
           const spaceDir = await fs.getDirectory(orgDir, space.name);
 
           for (const app of apps) {
+            // BREAK DE MODO TEST
+            if (isTestMode && downloadedFilesGlobal >= GLOBAL_FILES_STOP_LIMIT) {
+                 addLog(`Límite de Modo Test alcanzado (${GLOBAL_FILES_STOP_LIMIT} archivos). Deteniendo...`, "warning");
+                 break;
+            }
+
             await checkControlFlow(); // Checkpoint
 
             setStats(prev => ({ ...prev, currentApp: app.config.name }));
@@ -255,19 +287,28 @@ const App: React.FC = () => {
 
             // --- FILES ---
             await checkControlFlow(); // Checkpoint
-            const files = await podio.getAppFiles(app.app_id, FILES_LIMIT);
+            
+            // Si es test mode, pedimos pocos para no saturar.
+            // Si es full, pedimos por lotes grandes.
+            const files = await podio.getAppFiles(app.app_id, FILES_LIMIT_PER_APP);
+            
             setStats(prev => ({ ...prev, totalFilesFound: prev.totalFilesFound + files.length }));
             
             if (files.length > 0) {
               const filesDir = await fs.getDirectory(appDir, "Files");
               
               for (const file of files) {
+                  // BREAK DE MODO TEST (Nivel Archivo)
+                  if (isTestMode && downloadedFilesGlobal >= GLOBAL_FILES_STOP_LIMIT) break;
+
                   await checkControlFlow(); // Checkpoint per file
 
                   try {
                       const fileBlob = await podio.downloadFileContent(file.link);
                       if (fileBlob) {
                         await fs.writeFile(filesDir, file.name, fileBlob);
+                        
+                        downloadedFilesGlobal++; // Increment local counter
                         setStats(prev => ({ ...prev, totalFilesDownloaded: prev.totalFilesDownloaded + 1 }));
                       }
                   } catch (e: any) {
@@ -351,6 +392,7 @@ const App: React.FC = () => {
         totalOrgs: 0, processedOrgs: 0,
         totalSpaces: 0, processedSpaces: 0,
         totalApps: 0, processedApps: 0, 
+        totalItems: 0,
         totalExcelsGenerated: 0, totalFilesFound: 0, totalFilesDownloaded: 0 
     });
     setApiStats({ totalRequests: 0, rateLimitLimit: null, rateLimitRemaining: null });
