@@ -1,5 +1,5 @@
-import React, { useState, useCallback, useRef } from 'react';
-import { PodioGlobalCredentials, AppStatus, ProcessLog, BackupStats, FileSystemDirectoryHandle, ApiStats, BackupPlan } from './types';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
+import { PodioGlobalCredentials, AppStatus, ProcessLog, BackupStats, FileSystemDirectoryHandle, ApiStats, BackupPlan, PersistedState, PodioFile } from './types';
 import { CredentialsForm } from './components/CredentialsForm';
 import { ProcessDashboard } from './components/ProcessDashboard';
 import { PodioService } from './services/podioService';
@@ -12,6 +12,10 @@ const App: React.FC = () => {
   const [logs, setLogs] = useState<ProcessLog[]>([]);
   const [isTestMode, setIsTestMode] = useState(false);
   
+  // Persisted Plan (for resuming)
+  const [restoredPlan, setRestoredPlan] = useState<BackupPlan[] | null>(null);
+  const [restoredCreds, setRestoredCreds] = useState<PodioGlobalCredentials | null>(null);
+
   // Stats State
   const [stats, setStats] = useState<BackupStats>({
     totalOrgs: 0, processedOrgs: 0,
@@ -43,6 +47,58 @@ const App: React.FC = () => {
     });
   }, []);
 
+  // --- PERSISTENCE LOGIC ---
+  // Save state to localStorage periodically
+  useEffect(() => {
+    const interval = setInterval(() => {
+        if ([AppStatus.WRITING_TO_DISK, AppStatus.PROCESSING_BATCHES, AppStatus.PAUSED].includes(status)) {
+            const state: PersistedState = {
+                stats,
+                logs: logs.slice(-50), // Save last 50 logs only
+                token: podioServiceRef.current?.getSession() || null,
+                credentials: restoredCreds || null, // We need creds to recreate service
+                isTestMode,
+                plan: restoredPlan // We save the plan so we don't have to rescan
+            };
+            localStorage.setItem('podio_active_backup', JSON.stringify(state));
+        }
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [status, stats, logs, isTestMode, restoredPlan, restoredCreds]);
+
+  // Load state on Mount
+  useEffect(() => {
+    const saved = localStorage.getItem('podio_active_backup');
+    if (saved) {
+        try {
+            const parsed: PersistedState = JSON.parse(saved);
+            // If the backup wasn't completed or cancelled, offer resume
+            if (parsed.token && parsed.credentials) {
+                setStats(parsed.stats);
+                setLogs(parsed.logs);
+                setIsTestMode(parsed.isTestMode);
+                setRestoredPlan(parsed.plan);
+                setRestoredCreds(parsed.credentials);
+                
+                // Rehydrate Service
+                const podioService = new PodioService(
+                    parsed.credentials,
+                    (newApiStats) => setApiStats(newApiStats),
+                    (msg) => addLog(msg, 'network')
+                );
+                podioService.setSession(parsed.token);
+                podioServiceRef.current = podioService;
+
+                setStatus(AppStatus.RESTORE_SESSION);
+                addLog("Sesión previa detectada. Listo para reanudar.", "warning");
+            }
+        } catch (e) {
+            console.error("Error restaurando sesión:", e);
+            localStorage.removeItem('podio_active_backup');
+        }
+    }
+  }, []);
+
   // --- CONTROL HANDLERS ---
   const handlePause = () => {
     controlRef.current.isPaused = true;
@@ -52,7 +108,7 @@ const App: React.FC = () => {
 
   const handleResume = () => {
     controlRef.current.isPaused = false;
-    setStatus(AppStatus.WRITING_TO_DISK); // Or previous status
+    setStatus(AppStatus.WRITING_TO_DISK); 
     addLog("=== REANUDANDO PROCESO ===", 'success');
   };
 
@@ -62,6 +118,7 @@ const App: React.FC = () => {
         controlRef.current.isPaused = false; // Unpause to let loop exit
         setStatus(AppStatus.CANCELLED);
         addLog("!!! CANCELANDO... ESPERANDO A QUE TERMINE LA TAREA ACTUAL !!!", 'error');
+        localStorage.removeItem('podio_active_backup');
     }
   };
 
@@ -82,6 +139,7 @@ const App: React.FC = () => {
     setStatus(AppStatus.AUTHENTICATING);
     setLogs([]);
     setIsTestMode(creds.isTestMode);
+    setRestoredCreds(creds); // Save for persistence
     
     // Reset control refs
     controlRef.current = { isPaused: false, isCancelled: false };
@@ -138,13 +196,51 @@ const App: React.FC = () => {
         await runZipBackup(podioServiceRef.current);
       } else if (err.message.includes("User activation") || err.message.includes("permisos")) {
         addLog("ERROR DE PERMISOS: Debes conceder permisos de EDICIÓN/ESCRITURA en la ventana emergente del navegador.", "error");
-        setStatus(AppStatus.READY_TO_BACKUP);
+        setStatus(AppStatus.READY_TO_BACKUP); // Go back to ready
       } else {
         addLog(`Selección de carpeta cancelada: ${err.message}`, "warning");
         setStatus(AppStatus.READY_TO_BACKUP);
       }
     }
   };
+
+  // --- PARALLEL FILE PROCESSING ---
+  const processParallelFiles = async (
+    podio: PodioService, 
+    fs: FileSystemService, 
+    filesDir: FileSystemDirectoryHandle,
+    files: PodioFile[]
+  ) => {
+      const CHUNK_SIZE = 5; // Descargar 5 a la vez
+      
+      for (let i = 0; i < files.length; i += CHUNK_SIZE) {
+          await checkControlFlow(); // Check pause/cancel between chunks
+
+          const chunk = files.slice(i, i + CHUNK_SIZE);
+          
+          const promises = chunk.map(async (file) => {
+              try {
+                  const blob = await podio.downloadFileContent(file.link);
+                  if (blob) {
+                      await fs.writeFile(filesDir, file.name, blob);
+                      return true;
+                  }
+              } catch (e: any) {
+                  addLog(`Error descargando ${file.name}: ${e.message}`, 'error');
+              }
+              return false;
+          });
+
+          const results = await Promise.all(promises);
+          const successCount = results.filter(r => r).length;
+          
+          setStats(prev => ({ 
+              ...prev, 
+              totalFilesDownloaded: prev.totalFilesDownloaded + successCount 
+          }));
+      }
+  };
+
 
   const runDiskBackup = async (
     podio: PodioService, 
@@ -156,94 +252,76 @@ const App: React.FC = () => {
     try {
       // Configuración de límites según modo Test
       const MAX_SPACES = isTestMode ? 1 : 9999;
-      // En modo test no limitamos apps, escaneamos hasta encontrar 10 archivos
       const MAX_APPS = 9999; 
-      
       const EXCEL_LIMIT = isTestMode ? 50 : 20000;
       const FILES_LIMIT_PER_APP = isTestMode ? 10 : 5000; 
       const GLOBAL_FILES_STOP_LIMIT = isTestMode ? 10 : 99999999;
 
-      // --- FASE 1: DESCUBRIMIENTO ---
-      addLog("=== FASE 1: ESCANEO DE ESTRUCTURA ===", "info");
-      await checkControlFlow();
+      let backupPlan: BackupPlan[] = [];
 
-      const orgs = await podio.getOrganizations();
-      const backupPlan: BackupPlan[] = [];
-      let totalAppsCount = 0;
-      let totalSpacesCount = 0;
-      let totalItemsCount = 0;
+      // Si tenemos un plan restaurado y estamos reanudando, lo usamos.
+      // Si no, escaneamos.
+      if (restoredPlan && restoredPlan.length > 0) {
+          addLog("=== REANUDANDO SESIÓN: Usando plan de backup previo ===", "success");
+          backupPlan = restoredPlan;
+      } else {
+          // --- FASE 1: DESCUBRIMIENTO ---
+          addLog("=== FASE 1: ESCANEO DE ESTRUCTURA ===", "info");
+          await checkControlFlow();
 
-      setStats(prev => ({ ...prev, totalOrgs: orgs.length }));
-      addLog(`Se encontraron ${orgs.length} organizaciones.`, "info");
+          const orgs = await podio.getOrganizations();
+          let totalAppsCount = 0;
+          let totalSpacesCount = 0;
+          let totalItemsCount = 0;
 
-      for (const org of orgs) {
-          await checkControlFlow(); // Checkpoint
-          
-          const allSpaces = await podio.getSpaces(org.org_id);
-          const spacesToProcess = allSpaces.slice(0, MAX_SPACES);
-          
-          const spacePlans = [];
-          
-          totalSpacesCount += spacesToProcess.length;
-          setStats(prev => ({ ...prev, totalSpaces: totalSpacesCount }));
+          setStats(prev => ({ ...prev, totalOrgs: orgs.length }));
+          addLog(`Se encontraron ${orgs.length} organizaciones.`, "info");
 
-          for (const space of spacesToProcess) {
-              await checkControlFlow(); // Checkpoint
-              
-              const allApps = await podio.getApps(space.space_id);
-              // Si es test mode, tomamos todas las apps de ese espacio, 
-              // pero pararemos en la Fase 2 cuando lleguemos a los 10 archivos.
-              const appsToProcess = allApps.slice(0, MAX_APPS);
+          for (const org of orgs) {
+              await checkControlFlow();
+              const allSpaces = await podio.getSpaces(org.org_id);
+              const spacesToProcess = allSpaces.slice(0, MAX_SPACES);
+              const spacePlans = [];
+              totalSpacesCount += spacesToProcess.length;
+              setStats(prev => ({ ...prev, totalSpaces: totalSpacesCount }));
 
-              totalAppsCount += appsToProcess.length;
-              
-              // Sumamos los items reportados por Podio (sin hacer llamadas extra)
-              appsToProcess.forEach(app => {
-                  totalItemsCount += (app.item_count || 0);
-              });
+              for (const space of spacesToProcess) {
+                  await checkControlFlow();
+                  const allApps = await podio.getApps(space.space_id);
+                  const appsToProcess = allApps.slice(0, MAX_APPS);
+                  totalAppsCount += appsToProcess.length;
+                  appsToProcess.forEach(app => { totalItemsCount += (app.item_count || 0); });
 
-              setStats(prev => ({ 
-                  ...prev, 
-                  totalApps: totalAppsCount,
-                  totalItems: totalItemsCount
-              }));
-              
-              spacePlans.push({ space, apps: appsToProcess });
+                  setStats(prev => ({ ...prev, totalApps: totalAppsCount, totalItems: totalItemsCount }));
+                  spacePlans.push({ space, apps: appsToProcess });
+              }
+              backupPlan.push({ org, spaces: spacePlans });
           }
-          
-          backupPlan.push({ org, spaces: spacePlans });
+          // Guardar el plan para futuro
+          setRestoredPlan(backupPlan);
+          addLog(`ESCANEADO COMPLETO: ${totalItemsCount} Registros (Items) en ${totalAppsCount} Apps.`, "success");
       }
 
-      addLog(`ESCANEADO COMPLETO: ${totalItemsCount} Registros (Items) en ${totalAppsCount} Apps.`, "success");
-      
       // --- FASE 2: EJECUCIÓN ---
       setStatus(AppStatus.WRITING_TO_DISK);
-      addLog("=== FASE 2: INICIANDO DESCARGA ===", "info");
+      addLog("=== FASE 2: INICIANDO DESCARGA (Paralela x5) ===", "info");
 
-      // Usamos una variable local para tracking rápido dentro de loops
-      let downloadedFilesGlobal = 0;
-
+      // Si reanudamos, stats.totalFilesDownloaded ya tiene un valor.
+      // Debemos asegurarnos de no resetearlo a 0 arriba.
+      // El GLOBAL_FILES_STOP_LIMIT en modo test debe considerar lo que YA se descargó.
+      
       for (const orgPlan of backupPlan) {
-        // BREAK DE MODO TEST
-        if (isTestMode && downloadedFilesGlobal >= GLOBAL_FILES_STOP_LIMIT) break;
-
-        await checkControlFlow(); // Checkpoint
+        if (isTestMode && stats.totalFilesDownloaded >= GLOBAL_FILES_STOP_LIMIT) break;
+        await checkControlFlow();
 
         const { org, spaces } = orgPlan;
         setStats(prev => ({ ...prev, currentOrg: org.name }));
         
-        let orgDir: FileSystemDirectoryHandle;
-        try {
-             orgDir = await fs.getDirectory(rootDir, org.name);
-        } catch (e: any) {
-             throw new Error(`No se pudo crear carpeta para Organización ${org.name}. Verifica permisos. Error: ${e.message}`);
-        }
+        const orgDir = await fs.getDirectory(rootDir, org.name);
         
         for (const spacePlan of spaces) {
-          // BREAK DE MODO TEST
-          if (isTestMode && downloadedFilesGlobal >= GLOBAL_FILES_STOP_LIMIT) break;
-
-          await checkControlFlow(); // Checkpoint
+          if (isTestMode && stats.totalFilesDownloaded >= GLOBAL_FILES_STOP_LIMIT) break;
+          await checkControlFlow();
 
           const { space, apps } = spacePlan;
           setStats(prev => ({ ...prev, currentSpace: space.name }));
@@ -251,19 +329,19 @@ const App: React.FC = () => {
           const spaceDir = await fs.getDirectory(orgDir, space.name);
 
           for (const app of apps) {
-            // BREAK DE MODO TEST
-            if (isTestMode && downloadedFilesGlobal >= GLOBAL_FILES_STOP_LIMIT) {
+            if (isTestMode && stats.totalFilesDownloaded >= GLOBAL_FILES_STOP_LIMIT) {
                  addLog(`Límite de Modo Test alcanzado (${GLOBAL_FILES_STOP_LIMIT} archivos). Deteniendo...`, "warning");
                  break;
             }
-
-            await checkControlFlow(); // Checkpoint
+            await checkControlFlow();
 
             setStats(prev => ({ ...prev, currentApp: app.config.name }));
             const appDir = await fs.getDirectory(spaceDir, app.config.name);
             
             // --- EXCEL ---
-            addLog(`Solicitando Excel para '${app.config.name}'...`, "network");
+            // Solo generamos Excel si no lo hemos contado ya (lógica simple de reanudación)
+            // O podemos sobrescribirlo por seguridad.
+            addLog(`Verificando/Generando Excel para '${app.config.name}'...`, "network");
             let batchId = -1;
             try {
                batchId = await podio.triggerAppExcelExport(app.app_id, EXCEL_LIMIT);
@@ -273,7 +351,6 @@ const App: React.FC = () => {
             
             if (batchId !== -1) {
               await checkControlFlow(); 
-
               const batchResult = await podio.waitForBatch(batchId);
               if (batchResult && batchResult.file) {
                  const excelBlob = await podio.downloadFileContent(batchResult.file.link);
@@ -285,36 +362,17 @@ const App: React.FC = () => {
               }
             }
 
-            // --- FILES ---
-            await checkControlFlow(); // Checkpoint
-            
-            // Si es test mode, pedimos pocos para no saturar.
-            // Si es full, pedimos por lotes grandes.
+            // --- FILES (PARALLEL) ---
+            await checkControlFlow();
             const files = await podio.getAppFiles(app.app_id, FILES_LIMIT_PER_APP);
-            
             setStats(prev => ({ ...prev, totalFilesFound: prev.totalFilesFound + files.length }));
             
             if (files.length > 0) {
               const filesDir = await fs.getDirectory(appDir, "Files");
               
-              for (const file of files) {
-                  // BREAK DE MODO TEST (Nivel Archivo)
-                  if (isTestMode && downloadedFilesGlobal >= GLOBAL_FILES_STOP_LIMIT) break;
+              // NEW: Parallel Processing
+              await processParallelFiles(podio, fs, filesDir, files);
 
-                  await checkControlFlow(); // Checkpoint per file
-
-                  try {
-                      const fileBlob = await podio.downloadFileContent(file.link);
-                      if (fileBlob) {
-                        await fs.writeFile(filesDir, file.name, fileBlob);
-                        
-                        downloadedFilesGlobal++; // Increment local counter
-                        setStats(prev => ({ ...prev, totalFilesDownloaded: prev.totalFilesDownloaded + 1 }));
-                      }
-                  } catch (e: any) {
-                      addLog(`Falló escritura ${file.name}: ${e.message}`, "error");
-                  }
-              }
               const metadata = JSON.stringify(files, null, 2);
               await fs.writeFile(appDir, "_files_metadata.json", metadata);
             }
@@ -328,11 +386,13 @@ const App: React.FC = () => {
       
       addLog("¡Backup Completo Finalizado Exitosamente!", "success");
       setStatus(AppStatus.COMPLETED);
+      localStorage.removeItem('podio_active_backup'); // Clear session on success
 
     } catch (error: any) {
       if (error.message === "CANCELLED_BY_USER") {
           addLog("Proceso detenido por el usuario.", "error");
           setStatus(AppStatus.CANCELLED);
+          localStorage.removeItem('podio_active_backup'); // Clear session on cancel
       } else {
           console.error(error);
           addLog(`Error fatal durante el proceso: ${error.message}`, "error");
@@ -341,11 +401,10 @@ const App: React.FC = () => {
     }
   };
 
+  // ZIP Fallback (código simplificado existente)
   const runZipBackup = async (podio: PodioService) => {
-      // Fallback ZIP en memoria (sin FileSystemAccess)
       setStatus(AppStatus.DISCOVERING_STRUCTURE);
       const zip = new JSZip();
-
       try {
         const orgs = await podio.getOrganizations();
         for (const org of orgs) {
@@ -357,8 +416,6 @@ const App: React.FC = () => {
                 for (const app of apps) {
                     await checkControlFlow();
                     const folderPath = `${org.name}/${space.name}/${app.config.name}`;
-                    
-                    // Solo descargamos Excel en modo ZIP para no explotar la memoria
                     const batchId = await podio.triggerAppExcelExport(app.app_id, isTestMode ? 50 : 20000);
                     if (batchId !== -1) {
                          const batchResult = await podio.waitForBatch(batchId);
@@ -385,18 +442,10 @@ const App: React.FC = () => {
   };
 
   const handleReset = () => {
-    setStatus(AppStatus.IDLE);
-    setLogs([]);
-    controlRef.current = { isPaused: false, isCancelled: false };
-    setStats({ 
-        totalOrgs: 0, processedOrgs: 0,
-        totalSpaces: 0, processedSpaces: 0,
-        totalApps: 0, processedApps: 0, 
-        totalItems: 0,
-        totalExcelsGenerated: 0, totalFilesFound: 0, totalFilesDownloaded: 0 
-    });
-    setApiStats({ totalRequests: 0, rateLimitLimit: null, rateLimitRemaining: null });
-    podioServiceRef.current = null;
+    if (window.confirm("¿Estás seguro de iniciar un NUEVO backup? Se perderá el progreso actual no guardado.")) {
+        localStorage.removeItem('podio_active_backup');
+        window.location.reload(); // Hard reset easiest way to clean state
+    }
   };
 
   return (
@@ -416,7 +465,7 @@ const App: React.FC = () => {
              {status !== AppStatus.IDLE && (
                  <span className="flex items-center gap-2">
                     <div className={`w-2 h-2 rounded-full ${status === AppStatus.READY_TO_BACKUP ? 'bg-yellow-500' : 'bg-green-500'} animate-pulse`}></div> 
-                    {status === AppStatus.READY_TO_BACKUP ? 'Esperando Acción' : 'Active Session'}
+                    {status === AppStatus.RESTORE_SESSION ? 'Recuperación de Sesión' : status}
                  </span>
              )}
           </div>

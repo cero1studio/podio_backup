@@ -26,6 +26,16 @@ export class PodioService {
     this.onNetworkLog = onNetworkLog || null;
   }
 
+  // --- MÉTODOS PARA PERSISTENCIA ---
+  public getSession(): string | null {
+    return this.accessToken;
+  }
+
+  public setSession(token: string) {
+    this.accessToken = token;
+  }
+  // --------------------------------
+
   /**
    * Convierte una URL absoluta de Podio en una URL relativa que pase por nuestro Proxy local.
    */

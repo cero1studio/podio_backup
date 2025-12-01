@@ -83,13 +83,14 @@ export interface ProcessLog {
 export enum AppStatus {
   IDLE = 'IDLE',
   AUTHENTICATING = 'AUTHENTICATING',
+  RESTORE_SESSION = 'RESTORE_SESSION', // Nuevo: Recuperar tras recarga
   READY_TO_BACKUP = 'READY_TO_BACKUP', 
   SELECTING_DIR = 'SELECTING_DIR',
   DISCOVERING_STRUCTURE = 'DISCOVERING_STRUCTURE',
   PROCESSING_BATCHES = 'PROCESSING_BATCHES',
   WRITING_TO_DISK = 'WRITING_TO_DISK',
-  PAUSED = 'PAUSED',     // Nuevo estado
-  CANCELLED = 'CANCELLED', // Nuevo estado
+  PAUSED = 'PAUSED',
+  CANCELLED = 'CANCELLED',
   COMPLETED = 'COMPLETED',
   ERROR = 'ERROR'
 }
@@ -124,6 +125,15 @@ export interface BackupPlan {
     space: PodioSpace;
     apps: PodioApp[];
   }[];
+}
+
+export interface PersistedState {
+  stats: BackupStats;
+  logs: ProcessLog[];
+  token: string | null;
+  credentials: PodioGlobalCredentials | null;
+  isTestMode: boolean;
+  plan: BackupPlan[] | null;
 }
 
 // Nuevo: Estadísticas de API en tiempo real

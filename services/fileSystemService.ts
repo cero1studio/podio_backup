@@ -61,7 +61,7 @@ export class FileSystemService {
         await writable.write(content);
         await writable.close();
     } catch (error) {
-        console.error(`Error escribiendo archivo ${filename}:`, error);
+        console.error(`Error escribiendo archivo ${filename} -> ${sanitized}:`, error);
         // Intentamos con un nombre alternativo si falla (ej: nombres muy largos o caracteres prohibidos por OS)
         try {
             const fallbackName = `file_${Date.now()}_${Math.floor(Math.random() * 1000)}.dat`;
@@ -77,12 +77,38 @@ export class FileSystemService {
   }
 
   private sanitizeName(name: string): string {
-    // Reemplaza caracteres prohibidos en Windows/Unix
-    // Mantiene letras, números, espacios y guiones comunes
-    let sanitized = name.replace(/[<>:"/\\|?*]/g, '_');
-    sanitized = sanitized.replace(/\s+/g, ' ').trim();
-    if (sanitized.length > 200) sanitized = sanitized.substring(0, 190); // Limite NTFS conservador
-    if (sanitized === '.' || sanitized === '..') sanitized = '_safe_name_';
-    return sanitized || "Untitled";
+    if (!name) return "Untitled";
+
+    // 1. Reemplazo agresivo de caracteres prohibidos en Windows/Unix
+    // Windows prohibidos: < > : " / \ | ? *
+    // También eliminamos caracteres de control (0-31)
+    let sanitized = name.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_');
+    
+    // 2. Recortar espacios y puntos al inicio/final (Windows no le gustan los puntos al final)
+    sanitized = sanitized.trim().replace(/\.+$/, '');
+
+    // 3. Verificar nombres reservados de Windows (CON, PRN, AUX, NUL, COM1-9, LPT1-9)
+    const reserved = /^(con|prn|aux|nul|com[0-9]|lpt[0-9])$/i;
+    if (reserved.test(sanitized)) {
+        sanitized = '_' + sanitized + '_';
+    }
+
+    // 4. Limitar longitud (NTFS soporta 255, pero safe 150 para la ruta completa)
+    if (sanitized.length > 120) {
+        // Mantenemos la extensión si existe
+        const parts = sanitized.split('.');
+        if (parts.length > 1) {
+            const ext = parts.pop();
+            const base = parts.join('.').substring(0, 110);
+            sanitized = `${base}.${ext}`;
+        } else {
+            sanitized = sanitized.substring(0, 120);
+        }
+    }
+
+    // 5. Fallback si quedó vacío
+    if (sanitized.length === 0) sanitized = "Untitled_File";
+
+    return sanitized;
   }
 }

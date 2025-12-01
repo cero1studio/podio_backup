@@ -27,14 +27,13 @@ export const ProcessDashboard: React.FC<Props> = ({
   const logEndRef = useRef<HTMLDivElement>(null);
   
   const isProcessing = [
-    AppStatus.AUTHENTICATING,
-    AppStatus.SELECTING_DIR,
     AppStatus.DISCOVERING_STRUCTURE,
     AppStatus.PROCESSING_BATCHES,
     AppStatus.WRITING_TO_DISK
   ].includes(status);
 
   const isPaused = status === AppStatus.PAUSED;
+  const isRestoring = status === AppStatus.RESTORE_SESSION;
 
   // Auto-scroll logs
   useEffect(() => {
@@ -132,7 +131,7 @@ export const ProcessDashboard: React.FC<Props> = ({
 
       {/* Control Bar - Only Visible when Active or Paused */}
       {(isProcessing || isPaused) && (
-        <div className="bg-white p-3 rounded-lg border border-gray-200 shadow-sm flex items-center justify-between">
+        <div className="bg-white p-3 rounded-lg border border-gray-200 shadow-sm flex items-center justify-between sticky top-4 z-20">
             <div className="flex items-center gap-3 text-sm">
                 <i className={`fa-solid ${isPaused ? 'fa-pause' : 'fa-spinner fa-spin'} text-indigo-600`}></i>
                 <div className="flex flex-wrap gap-2 items-center text-gray-700">
@@ -155,14 +154,14 @@ export const ProcessDashboard: React.FC<Props> = ({
                 {!isPaused ? (
                     <button 
                         onClick={onPause}
-                        className="px-4 py-2 bg-orange-100 hover:bg-orange-200 text-orange-700 rounded-lg text-sm font-medium transition flex items-center gap-2"
+                        className="px-4 py-2 bg-orange-100 hover:bg-orange-200 text-orange-700 rounded-lg text-sm font-medium transition flex items-center gap-2 border border-orange-200"
                     >
                         <i className="fa-solid fa-pause"></i> Pausar
                     </button>
                 ) : (
                     <button 
                         onClick={onResume}
-                        className="px-4 py-2 bg-green-100 hover:bg-green-200 text-green-700 rounded-lg text-sm font-medium transition flex items-center gap-2 animate-pulse"
+                        className="px-4 py-2 bg-green-100 hover:bg-green-200 text-green-700 rounded-lg text-sm font-medium transition flex items-center gap-2 animate-pulse border border-green-200"
                     >
                         <i className="fa-solid fa-play"></i> Reanudar
                     </button>
@@ -170,11 +169,42 @@ export const ProcessDashboard: React.FC<Props> = ({
                 
                 <button 
                     onClick={onCancel}
-                    className="px-4 py-2 bg-red-100 hover:bg-red-200 text-red-700 rounded-lg text-sm font-medium transition flex items-center gap-2"
+                    className="px-4 py-2 bg-red-100 hover:bg-red-200 text-red-700 rounded-lg text-sm font-medium transition flex items-center gap-2 border border-red-200"
                 >
                     <i className="fa-solid fa-stop"></i> Cancelar
                 </button>
             </div>
+        </div>
+      )}
+
+      {/* RESTORE SESSION ACTION */}
+      {status === AppStatus.RESTORE_SESSION && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-8 text-center shadow-sm">
+           <div className="mb-4">
+              <i className="fa-solid fa-clock-rotate-left text-5xl text-amber-500 mb-2"></i>
+              <h2 className="text-2xl font-bold text-gray-800">Backup Interrumpido Detectado</h2>
+              <p className="text-gray-600 max-w-lg mx-auto mt-2">
+                Se detectó un proceso anterior que llevaba <strong>{stats.processedApps} apps</strong> procesadas. 
+                ¿Deseas continuarlo?
+              </p>
+           </div>
+           <div className="flex gap-4 justify-center mt-6">
+               <button 
+                 onClick={onReset}
+                 className="px-6 py-3 bg-gray-200 hover:bg-gray-300 text-gray-700 font-semibold rounded-lg shadow transition"
+               >
+                  Descartar y Empezar Nuevo
+               </button>
+               <button 
+                 onClick={onDownload}
+                 className="px-8 py-3 bg-amber-600 hover:bg-amber-700 text-white font-bold rounded-lg shadow-lg transform hover:scale-105 transition flex items-center gap-2"
+               >
+                  <i className="fa-solid fa-folder-open"></i> Seleccionar Carpeta y Reanudar
+               </button>
+           </div>
+           <p className="text-xs text-gray-400 mt-4 italic">
+             Nota: Por seguridad del navegador, debes volver a seleccionar la carpeta donde estabas guardando los archivos.
+           </p>
         </div>
       )}
 
@@ -219,7 +249,7 @@ export const ProcessDashboard: React.FC<Props> = ({
               {logs.map((log, idx) => (
                 <div key={idx} className="flex gap-3 hover:bg-gray-900 py-0.5 px-1 rounded">
                   <span className="text-gray-600 shrink-0 select-none w-16 text-right">
-                    {log.timestamp.toLocaleTimeString([], {hour12: false, hour: '2-digit', minute:'2-digit', second:'2-digit'})}
+                    {log.timestamp && new Date(log.timestamp).toLocaleTimeString([], {hour12: false, hour: '2-digit', minute:'2-digit', second:'2-digit'})}
                   </span>
                   <span className={`break-all ${
                     log.type === 'error' ? 'text-red-500 font-bold' : 
@@ -260,9 +290,9 @@ export const ProcessDashboard: React.FC<Props> = ({
                </div>
              )}
              
-             {(!isProcessing && status !== AppStatus.IDLE) && (
-               <button onClick={onReset} className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition text-sm font-medium ml-auto">
-                 Reiniciar
+             {(!isProcessing && !isPaused && status !== AppStatus.IDLE && status !== AppStatus.RESTORE_SESSION) && (
+               <button onClick={onReset} className="px-6 py-3 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition text-sm font-bold shadow-md ml-auto flex items-center gap-2">
+                 <i className="fa-solid fa-rotate-right"></i> Nuevo Backup
                </button>
              )}
           </div>
