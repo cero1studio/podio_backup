@@ -1,11 +1,15 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
-import { PodioGlobalCredentials, AppStatus, ProcessLog, BackupStats, FileSystemDirectoryHandle, ApiStats, BackupPlan, PersistedState, PodioFile } from './types';
+import { PodioGlobalCredentials, AppStatus, ProcessLog, BackupStats, FileSystemDirectoryHandle, ApiStats, BackupPlan, PersistedState, PodioFile, PodioApp, PodioOrg, PodioSpace } from './types';
 import { CredentialsForm } from './components/CredentialsForm';
 import { ProcessDashboard } from './components/ProcessDashboard';
 import { PodioService } from './services/podioService';
 import { FileSystemService } from './services/fileSystemService';
 import JSZip from 'jszip';
 import FileSaver from 'file-saver';
+
+// CONFIGURACIÓN DE PARALELISMO
+const CONCURRENT_APPS = 3; // Cuantas apps procesar a la vez
+const CONCURRENT_FILES_PER_APP = 10; // Cuantos archivos descargar a la vez por app
 
 const App: React.FC = () => {
   const [status, setStatus] = useState<AppStatus>(AppStatus.IDLE);
@@ -16,11 +20,15 @@ const App: React.FC = () => {
   const [restoredPlan, setRestoredPlan] = useState<BackupPlan[] | null>(null);
   const [restoredCreds, setRestoredCreds] = useState<PodioGlobalCredentials | null>(null);
 
+  // Auto-Resume Timer
+  const [autoResumeTimer, setAutoResumeTimer] = useState<number | null>(null);
+
   // Stats State
   const [stats, setStats] = useState<BackupStats>({
     totalOrgs: 0, processedOrgs: 0,
     totalSpaces: 0, processedSpaces: 0,
     totalApps: 0, processedApps: 0,
+    activeWorkers: 0,
     totalItems: 0,
     totalExcelsGenerated: 0,
     totalFilesFound: 0,
@@ -46,6 +54,39 @@ const App: React.FC = () => {
         return newLogs;
     });
   }, []);
+
+  // --- AUTO RESUME LOGIC (15s) ---
+  useEffect(() => {
+    let timerInterval: any;
+    if (status === AppStatus.RESTORE_SESSION) {
+        setAutoResumeTimer(15);
+        timerInterval = setInterval(() => {
+            setAutoResumeTimer(prev => {
+                if (prev === null || prev <= 1) {
+                    clearInterval(timerInterval);
+                    // Intentar auto-click (el navegador bloqueará esto usualmente, pero lo intentamos)
+                    // Si falla, el botón en el dashboard parpadeará
+                    return 0;
+                }
+                return prev - 1;
+            });
+        }, 1000);
+    } else {
+        setAutoResumeTimer(null);
+    }
+    return () => clearInterval(timerInterval);
+  }, [status]);
+
+  // Try auto-trigger when timer hits 0
+  useEffect(() => {
+      if (autoResumeTimer === 0 && status === AppStatus.RESTORE_SESSION) {
+          addLog("Intentando auto-reanudación...", "warning");
+          handleSelectFolder().catch(() => {
+              addLog("⚠️ El navegador bloqueó el auto-inicio. Por favor haz clic en el botón manualmente.", "warning");
+          });
+      }
+  }, [autoResumeTimer, status]);
+
 
   // --- PERSISTENCE LOGIC ---
   // Save state to localStorage periodically
@@ -90,7 +131,7 @@ const App: React.FC = () => {
                 podioServiceRef.current = podioService;
 
                 setStatus(AppStatus.RESTORE_SESSION);
-                addLog("Sesión previa detectada. Listo para reanudar.", "warning");
+                addLog("Sesión previa detectada. Iniciando cuenta regresiva de recuperación...", "warning");
             }
         } catch (e) {
             console.error("Error restaurando sesión:", e);
@@ -117,7 +158,7 @@ const App: React.FC = () => {
         controlRef.current.isCancelled = true;
         controlRef.current.isPaused = false; // Unpause to let loop exit
         setStatus(AppStatus.CANCELLED);
-        addLog("!!! CANCELANDO... ESPERANDO A QUE TERMINE LA TAREA ACTUAL !!!", 'error');
+        addLog("!!! CANCELANDO... ESPERANDO A QUE TERMINEN LOS HILOS ACTUALES !!!", 'error');
         localStorage.removeItem('podio_active_backup');
     }
   };
@@ -148,6 +189,7 @@ const App: React.FC = () => {
         totalOrgs: 0, processedOrgs: 0,
         totalSpaces: 0, processedSpaces: 0,
         totalApps: 0, processedApps: 0, 
+        activeWorkers: 0,
         totalItems: 0,
         totalExcelsGenerated: 0, totalFilesFound: 0, totalFilesDownloaded: 0 
     });
@@ -196,7 +238,12 @@ const App: React.FC = () => {
         await runZipBackup(podioServiceRef.current);
       } else if (err.message.includes("User activation") || err.message.includes("permisos")) {
         addLog("ERROR DE PERMISOS: Debes conceder permisos de EDICIÓN/ESCRITURA en la ventana emergente del navegador.", "error");
-        setStatus(AppStatus.READY_TO_BACKUP); // Go back to ready
+        // Si falló el auto-resume, nos quedamos en restore session
+        if (status === AppStatus.RESTORE_SESSION) {
+            // No hacemos nada, dejamos que el usuario haga clic de nuevo
+        } else {
+            setStatus(AppStatus.READY_TO_BACKUP);
+        }
       } else {
         addLog(`Selección de carpeta cancelada: ${err.message}`, "warning");
         setStatus(AppStatus.READY_TO_BACKUP);
@@ -211,7 +258,8 @@ const App: React.FC = () => {
     filesDir: FileSystemDirectoryHandle,
     files: PodioFile[]
   ) => {
-      const CHUNK_SIZE = 5; // Descargar 5 a la vez
+      // Usamos el valor constante definido arriba
+      const CHUNK_SIZE = CONCURRENT_FILES_PER_APP; 
       
       for (let i = 0; i < files.length; i += CHUNK_SIZE) {
           await checkControlFlow(); // Check pause/cancel between chunks
@@ -260,7 +308,6 @@ const App: React.FC = () => {
       let backupPlan: BackupPlan[] = [];
 
       // Si tenemos un plan restaurado y estamos reanudando, lo usamos.
-      // Si no, escaneamos.
       if (restoredPlan && restoredPlan.length > 0) {
           addLog("=== REANUDANDO SESIÓN: Usando plan de backup previo ===", "success");
           backupPlan = restoredPlan;
@@ -289,10 +336,22 @@ const App: React.FC = () => {
                   await checkControlFlow();
                   const allApps = await podio.getApps(space.space_id);
                   const appsToProcess = allApps.slice(0, MAX_APPS);
+                  
                   totalAppsCount += appsToProcess.length;
-                  appsToProcess.forEach(app => { totalItemsCount += (app.item_count || 0); });
+                  
+                  // Acumular Items de forma segura
+                  appsToProcess.forEach(app => { 
+                      const count = Number(app.item_count || 0);
+                      totalItemsCount += count;
+                  });
 
-                  setStats(prev => ({ ...prev, totalApps: totalAppsCount, totalItems: totalItemsCount }));
+                  // Actualizar Stats inmediatamente
+                  setStats(prev => ({ 
+                      ...prev, 
+                      totalApps: totalAppsCount, 
+                      totalItems: totalItemsCount 
+                  }));
+                  
                   spacePlans.push({ space, apps: appsToProcess });
               }
               backupPlan.push({ org, spaces: spacePlans });
@@ -302,97 +361,107 @@ const App: React.FC = () => {
           addLog(`ESCANEADO COMPLETO: ${totalItemsCount} Registros (Items) en ${totalAppsCount} Apps.`, "success");
       }
 
-      // --- FASE 2: EJECUCIÓN ---
+      // --- FASE 2: EJECUCIÓN PARALELA (POOL) ---
       setStatus(AppStatus.WRITING_TO_DISK);
-      addLog("=== FASE 2: INICIANDO DESCARGA (Paralela x5) ===", "info");
+      addLog(`=== FASE 2: INICIANDO WORKER POOL (${CONCURRENT_APPS} Apps simultáneas) ===`, "info");
 
-      // Si reanudamos, stats.totalFilesDownloaded ya tiene un valor.
-      // Debemos asegurarnos de no resetearlo a 0 arriba.
-      // El GLOBAL_FILES_STOP_LIMIT en modo test debe considerar lo que YA se descargó.
-      
-      for (const orgPlan of backupPlan) {
-        if (isTestMode && stats.totalFilesDownloaded >= GLOBAL_FILES_STOP_LIMIT) break;
-        await checkControlFlow();
-
-        const { org, spaces } = orgPlan;
-        setStats(prev => ({ ...prev, currentOrg: org.name }));
-        
-        const orgDir = await fs.getDirectory(rootDir, org.name);
-        
-        for (const spacePlan of spaces) {
-          if (isTestMode && stats.totalFilesDownloaded >= GLOBAL_FILES_STOP_LIMIT) break;
-          await checkControlFlow();
-
-          const { space, apps } = spacePlan;
-          setStats(prev => ({ ...prev, currentSpace: space.name }));
-          
-          const spaceDir = await fs.getDirectory(orgDir, space.name);
-
-          for (const app of apps) {
-            if (isTestMode && stats.totalFilesDownloaded >= GLOBAL_FILES_STOP_LIMIT) {
-                 addLog(`Límite de Modo Test alcanzado (${GLOBAL_FILES_STOP_LIMIT} archivos). Deteniendo...`, "warning");
-                 break;
-            }
-            await checkControlFlow();
-
-            setStats(prev => ({ ...prev, currentApp: app.config.name }));
-            const appDir = await fs.getDirectory(spaceDir, app.config.name);
-            
-            // --- EXCEL ---
-            // Solo generamos Excel si no lo hemos contado ya (lógica simple de reanudación)
-            // O podemos sobrescribirlo por seguridad.
-            addLog(`Verificando/Generando Excel para '${app.config.name}'...`, "network");
-            let batchId = -1;
-            try {
-               batchId = await podio.triggerAppExcelExport(app.app_id, EXCEL_LIMIT);
-            } catch (ex) {
-               addLog(`Fallo al solicitar Excel: ${ex}`, "error");
-            }
-            
-            if (batchId !== -1) {
-              await checkControlFlow(); 
-              const batchResult = await podio.waitForBatch(batchId);
-              if (batchResult && batchResult.file) {
-                 const excelBlob = await podio.downloadFileContent(batchResult.file.link);
-                 if (excelBlob) {
-                   await fs.writeFile(appDir, `${app.config.name}.xlsx`, excelBlob);
-                   setStats(prev => ({ ...prev, totalExcelsGenerated: prev.totalExcelsGenerated + 1 }));
-                   addLog(`Excel guardado: ${app.config.name}.xlsx`, "success");
-                 }
-              }
-            }
-
-            // --- FILES (PARALLEL) ---
-            await checkControlFlow();
-            const files = await podio.getAppFiles(app.app_id, FILES_LIMIT_PER_APP);
-            setStats(prev => ({ ...prev, totalFilesFound: prev.totalFilesFound + files.length }));
-            
-            if (files.length > 0) {
-              const filesDir = await fs.getDirectory(appDir, "Files");
-              
-              // NEW: Parallel Processing
-              await processParallelFiles(podio, fs, filesDir, files);
-
-              const metadata = JSON.stringify(files, null, 2);
-              await fs.writeFile(appDir, "_files_metadata.json", metadata);
-            }
-
-            setStats(prev => ({ ...prev, processedApps: prev.processedApps + 1 }));
-          }
-          setStats(prev => ({ ...prev, processedSpaces: prev.processedSpaces + 1 }));
-        }
-        setStats(prev => ({ ...prev, processedOrgs: prev.processedOrgs + 1 }));
+      // Aplanar todo el plan en una cola de tareas
+      interface AppTask {
+          org: PodioOrg;
+          space: PodioSpace;
+          app: PodioApp;
       }
+
+      const queue: AppTask[] = [];
+      for (const orgPlan of backupPlan) {
+          for (const spacePlan of orgPlan.spaces) {
+              for (const app of spacePlan.apps) {
+                  queue.push({
+                      org: orgPlan.org,
+                      space: spacePlan.space,
+                      app: app
+                  });
+              }
+          }
+      }
+
+      // Función Worker
+      const runWorker = async (workerId: number) => {
+          while (queue.length > 0) {
+              if (isTestMode && stats.totalFilesDownloaded >= GLOBAL_FILES_STOP_LIMIT) break;
+              await checkControlFlow();
+
+              // Tomar tarea
+              const task = queue.shift(); 
+              if (!task) break;
+
+              setStats(prev => ({ ...prev, activeWorkers: (prev.activeWorkers || 0) + 1 }));
+
+              try {
+                  const { org, space, app } = task;
+                  // Crear estructura de directorios (puede ser redundante pero es seguro en paralelo)
+                  const orgDir = await fs.getDirectory(rootDir, org.name);
+                  const spaceDir = await fs.getDirectory(orgDir, space.name);
+                  const appDir = await fs.getDirectory(spaceDir, app.config.name);
+
+                  // 1. EXCEL
+                  // Lógica simple: si ya existe el log de completado, no repetimos (opcional)
+                  // Aquí siempre intentamos para asegurar
+                  let batchId = -1;
+                  try {
+                       batchId = await podio.triggerAppExcelExport(app.app_id, EXCEL_LIMIT);
+                  } catch (ex) { /* log handled inside */ }
+
+                  if (batchId !== -1) {
+                      await checkControlFlow();
+                      const batchResult = await podio.waitForBatch(batchId);
+                      if (batchResult && batchResult.file) {
+                          const excelBlob = await podio.downloadFileContent(batchResult.file.link);
+                          if (excelBlob) {
+                              await fs.writeFile(appDir, `${app.config.name}.xlsx`, excelBlob);
+                              setStats(prev => ({ ...prev, totalExcelsGenerated: prev.totalExcelsGenerated + 1 }));
+                              addLog(`Worker ${workerId}: Excel guardado (${app.config.name})`, "success");
+                          }
+                      }
+                  }
+
+                  // 2. ARCHIVOS
+                  await checkControlFlow();
+                  const files = await podio.getAppFiles(app.app_id, FILES_LIMIT_PER_APP);
+                  setStats(prev => ({ ...prev, totalFilesFound: prev.totalFilesFound + files.length }));
+                  
+                  if (files.length > 0) {
+                      const filesDir = await fs.getDirectory(appDir, "Files");
+                      await processParallelFiles(podio, fs, filesDir, files);
+                  }
+                  
+                  setStats(prev => ({ ...prev, processedApps: prev.processedApps + 1 }));
+
+              } catch (e: any) {
+                  addLog(`Worker ${workerId} Error en App ${task.app.config.name}: ${e.message}`, "error");
+              } finally {
+                  setStats(prev => ({ ...prev, activeWorkers: (prev.activeWorkers || 0) - 1 }));
+              }
+          }
+      };
+
+      // Lanzar Workers
+      const workers = [];
+      for (let i = 0; i < CONCURRENT_APPS; i++) {
+          workers.push(runWorker(i + 1));
+      }
+
+      await Promise.all(workers);
       
       addLog("¡Backup Completo Finalizado Exitosamente!", "success");
       setStatus(AppStatus.COMPLETED);
-      localStorage.removeItem('podio_active_backup'); // Clear session on success
+      localStorage.removeItem('podio_active_backup'); 
 
     } catch (error: any) {
       if (error.message === "CANCELLED_BY_USER") {
           addLog("Proceso detenido por el usuario.", "error");
           setStatus(AppStatus.CANCELLED);
-          localStorage.removeItem('podio_active_backup'); // Clear session on cancel
+          localStorage.removeItem('podio_active_backup');
       } else {
           console.error(error);
           addLog(`Error fatal durante el proceso: ${error.message}`, "error");
@@ -444,7 +513,7 @@ const App: React.FC = () => {
   const handleReset = () => {
     if (window.confirm("¿Estás seguro de iniciar un NUEVO backup? Se perderá el progreso actual no guardado.")) {
         localStorage.removeItem('podio_active_backup');
-        window.location.reload(); // Hard reset easiest way to clean state
+        window.location.reload(); 
     }
   };
 
@@ -488,6 +557,7 @@ const App: React.FC = () => {
             onPause={handlePause}
             onResume={handleResume}
             onCancel={handleCancel}
+            autoResumeTimer={autoResumeTimer}
           />
         )}
       </main>

@@ -13,6 +13,11 @@ export class PodioService {
   
   // Estado interno de API
   private requestCount = 0;
+  
+  // Caché de Rate Limit para evitar parpadeos (--/--)
+  private lastRateLimitLimit: number | null = null;
+  private lastRateLimitRemaining: number | null = null;
+
   private onStatsUpdate: ApiStatsCallback | null = null;
   private onNetworkLog: LogCallback | null = null;
 
@@ -84,13 +89,15 @@ export class PodioService {
             // MANEJO DE RATE LIMIT (429)
             if (response.status === 429) {
                 const waitMinutes = 10;
-                const waitMs = waitMinutes * 60 * 1000;
+                // Añadir Jitter (aleatoriedad) de 0 a 5 segundos para que los 3 hilos no despierten al mismo tiempo
+                const jitter = Math.floor(Math.random() * 5000); 
+                const waitMs = (waitMinutes * 60 * 1000) + jitter;
                 
                 if (this.onNetworkLog) {
-                    this.onNetworkLog(`⚠ Rate Limit Crítico (429). Pausando ${waitMinutes} minutos antes de reintentar...`);
+                    this.onNetworkLog(`⚠ Rate Limit Crítico (429). Pausando hilo por ${waitMinutes}m...`);
                 }
                 
-                // Esperar 10 minutos
+                // Esperar 10 minutos + jitter
                 await new Promise(resolve => setTimeout(resolve, waitMs));
                 
                 if (this.onNetworkLog) {
@@ -101,14 +108,20 @@ export class PodioService {
                 continue;
             }
 
-            const limit = response.headers.get('X-Rate-Limit-Limit');
-            const remaining = response.headers.get('X-Rate-Limit-Remaining');
+            // ACTUALIZACIÓN INTELIGENTE DE RATE LIMITS
+            // Solo actualizamos si los headers existen, si no, mantenemos el último valor conocido.
+            const limitHeader = response.headers.get('X-Rate-Limit-Limit');
+            const remainingHeader = response.headers.get('X-Rate-Limit-Remaining');
+
+            if (limitHeader) this.lastRateLimitLimit = parseInt(limitHeader);
+            if (remainingHeader) this.lastRateLimitRemaining = parseInt(remainingHeader);
 
             if (this.onStatsUpdate) {
                 this.onStatsUpdate({
-                totalRequests: this.requestCount,
-                rateLimitLimit: limit ? parseInt(limit) : null,
-                rateLimitRemaining: remaining ? parseInt(remaining) : null
+                    totalRequests: this.requestCount,
+                    // Enviamos siempre el último valor conocido para evitar parpadeos a null
+                    rateLimitLimit: this.lastRateLimitLimit,
+                    rateLimitRemaining: this.lastRateLimitRemaining
                 });
             }
 
@@ -167,7 +180,8 @@ export class PodioService {
   }
 
   async getApps(spaceId: number): Promise<PodioApp[]> {
-    const response = await this.request(`/app/space/${spaceId}/`);
+    // Agregamos include_inactive=false para intentar asegurar mejor data
+    const response = await this.request(`/app/space/${spaceId}/?include_inactive=false`);
     if (!response.ok) throw new Error(`Error al obtener apps: ${response.status}`);
     return await response.json();
   }

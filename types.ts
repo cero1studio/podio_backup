@@ -109,6 +109,7 @@ export interface BackupStats {
 
   totalApps: number;
   processedApps: number;
+  activeWorkers?: number; // Nuevo: Hilos activos
 
   totalItems: number; // Nuevo: Suma de item_count de todas las apps
   

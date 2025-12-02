@@ -11,6 +11,7 @@ interface Props {
   onPause: () => void;
   onResume: () => void;
   onCancel: () => void;
+  autoResumeTimer?: number | null; // Nuevo prop para el contador
 }
 
 export const ProcessDashboard: React.FC<Props> = ({
@@ -22,7 +23,8 @@ export const ProcessDashboard: React.FC<Props> = ({
   onReset,
   onPause,
   onResume,
-  onCancel
+  onCancel,
+  autoResumeTimer
 }) => {
   const logEndRef = useRef<HTMLDivElement>(null);
   
@@ -43,7 +45,8 @@ export const ProcessDashboard: React.FC<Props> = ({
   }, [logs]);
 
   // Calcular porcentaje de uso de API
-  const rateLimitPercent = apiStats.rateLimitLimit && apiStats.rateLimitRemaining 
+  // Si los valores son null (inicio), asumimos 100% disponible
+  const rateLimitPercent = (apiStats.rateLimitLimit && apiStats.rateLimitRemaining)
       ? (apiStats.rateLimitRemaining / apiStats.rateLimitLimit) * 100 
       : 100;
 
@@ -68,7 +71,14 @@ export const ProcessDashboard: React.FC<Props> = ({
           </div>
           <div className="flex justify-between mt-1 text-[10px] text-gray-400">
              <span>{stats.processedOrgs}/{stats.totalOrgs} Orgs</span>
-             <span>{stats.processedSpaces}/{stats.totalSpaces} Espacios</span>
+             <span className="flex items-center gap-1">
+               {stats.activeWorkers && stats.activeWorkers > 0 && (
+                   <span className="text-blue-600 font-bold bg-blue-50 px-1 rounded animate-pulse">
+                       ⚡ {stats.activeWorkers} Hilos
+                   </span>
+               )}
+               {stats.processedSpaces}/{stats.totalSpaces} Espacios
+             </span>
           </div>
         </div>
 
@@ -108,7 +118,7 @@ export const ProcessDashboard: React.FC<Props> = ({
                <div className="text-right">
                    <p className="text-xs text-gray-400 uppercase tracking-wide font-mono mb-1">Rate Limit</p>
                    <span className={`text-xl font-mono font-bold ${rateLimitPercent < 20 ? 'text-red-400' : 'text-blue-400'}`}>
-                       {apiStats.rateLimitRemaining ?? '-'} / {apiStats.rateLimitLimit ?? '-'}
+                       {apiStats.rateLimitRemaining !== null ? apiStats.rateLimitRemaining : '-'} / {apiStats.rateLimitLimit !== null ? apiStats.rateLimitLimit : '-'}
                    </span>
                </div>
            </div>
@@ -136,16 +146,14 @@ export const ProcessDashboard: React.FC<Props> = ({
                 <i className={`fa-solid ${isPaused ? 'fa-pause' : 'fa-spinner fa-spin'} text-indigo-600`}></i>
                 <div className="flex flex-wrap gap-2 items-center text-gray-700">
                     <span className="font-semibold">
-                        {status === AppStatus.DISCOVERING_STRUCTURE ? 'Analizando:' : 'Procesando:'}
+                        {status === AppStatus.DISCOVERING_STRUCTURE ? 'Analizando:' : 'Procesando en Paralelo:'}
                     </span>
-                    {stats.currentOrg && <span>{stats.currentOrg}</span>}
-                    <span className="text-gray-300">/</span>
-                    {stats.currentSpace && <span>{stats.currentSpace}</span>}
-                    {stats.currentApp && (
-                        <>
-                            <span className="text-gray-300">/</span>
-                            <span className="bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded text-xs font-medium border border-indigo-100">{stats.currentApp}</span>
-                        </>
+                    {stats.activeWorkers && stats.activeWorkers > 0 ? (
+                        <span className="bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded text-xs font-bold border border-indigo-100 animate-pulse">
+                            🚀 {stats.activeWorkers} Apps simultáneas
+                        </span>
+                    ) : (
+                       <span>Preparando...</span>
                     )}
                 </div>
             </div>
@@ -188,22 +196,32 @@ export const ProcessDashboard: React.FC<Props> = ({
                 ¿Deseas continuarlo?
               </p>
            </div>
-           <div className="flex gap-4 justify-center mt-6">
+           <div className="flex flex-col md:flex-row gap-4 justify-center mt-6 items-center">
                <button 
                  onClick={onReset}
-                 className="px-6 py-3 bg-gray-200 hover:bg-gray-300 text-gray-700 font-semibold rounded-lg shadow transition"
+                 className="px-6 py-3 bg-gray-200 hover:bg-gray-300 text-gray-700 font-semibold rounded-lg shadow transition w-full md:w-auto"
                >
-                  Descartar y Empezar Nuevo
+                  Descartar
                </button>
                <button 
                  onClick={onDownload}
-                 className="px-8 py-3 bg-amber-600 hover:bg-amber-700 text-white font-bold rounded-lg shadow-lg transform hover:scale-105 transition flex items-center gap-2"
+                 className={`px-8 py-3 font-bold rounded-lg shadow-lg transition flex items-center gap-2 w-full md:w-auto justify-center ${
+                    autoResumeTimer === 0 
+                        ? 'bg-red-500 hover:bg-red-600 text-white animate-pulse ring-4 ring-red-200' 
+                        : 'bg-amber-600 hover:bg-amber-700 text-white'
+                 }`}
                >
-                  <i className="fa-solid fa-folder-open"></i> Seleccionar Carpeta y Reanudar
+                  <i className="fa-solid fa-folder-open"></i> 
+                  {autoResumeTimer && autoResumeTimer > 0 
+                      ? `Reanudar automáticamente en ${autoResumeTimer}s...` 
+                      : autoResumeTimer === 0 
+                          ? '⚠️ CLIC REQUERIDO PARA CONTINUAR' 
+                          : 'Seleccionar Carpeta y Reanudar'
+                  }
                </button>
            </div>
            <p className="text-xs text-gray-400 mt-4 italic">
-             Nota: Por seguridad del navegador, debes volver a seleccionar la carpeta donde estabas guardando los archivos.
+             Nota: Por seguridad del navegador, siempre debes aprobar el acceso a disco manualmente.
            </p>
         </div>
       )}
