@@ -76,37 +76,51 @@ export class PodioService {
       this.onNetworkLog(`[PROXY] ${method} ${logUrl}`);
     }
 
-    try {
-      let response = await fetch(targetUrl, { ...options, headers });
-      
-      // MANEJO DE RATE LIMIT (429)
-      if (response.status === 429) {
-          if (this.onNetworkLog) this.onNetworkLog("⚠ Rate Limit Alcanzado (429). Pausando 60s...");
-          
-          await new Promise(resolve => setTimeout(resolve, 60000));
-          // Reintentar una vez
-          response = await fetch(targetUrl, { ...options, headers });
-      }
+    // Bucle infinito para manejo robusto de Rate Limit (429)
+    while (true) {
+        try {
+            const response = await fetch(targetUrl, { ...options, headers });
+            
+            // MANEJO DE RATE LIMIT (429)
+            if (response.status === 429) {
+                const waitMinutes = 10;
+                const waitMs = waitMinutes * 60 * 1000;
+                
+                if (this.onNetworkLog) {
+                    this.onNetworkLog(`⚠ Rate Limit Crítico (429). Pausando ${waitMinutes} minutos antes de reintentar...`);
+                }
+                
+                // Esperar 10 minutos
+                await new Promise(resolve => setTimeout(resolve, waitMs));
+                
+                if (this.onNetworkLog) {
+                    this.onNetworkLog(`♻ Reanudando petición tras pausa de ${waitMinutes}m...`);
+                }
+                
+                // Volver al inicio del while para reintentar
+                continue;
+            }
 
-      const limit = response.headers.get('X-Rate-Limit-Limit');
-      const remaining = response.headers.get('X-Rate-Limit-Remaining');
+            const limit = response.headers.get('X-Rate-Limit-Limit');
+            const remaining = response.headers.get('X-Rate-Limit-Remaining');
 
-      if (this.onStatsUpdate) {
-        this.onStatsUpdate({
-          totalRequests: this.requestCount,
-          rateLimitLimit: limit ? parseInt(limit) : null,
-          rateLimitRemaining: remaining ? parseInt(remaining) : null
-        });
-      }
+            if (this.onStatsUpdate) {
+                this.onStatsUpdate({
+                totalRequests: this.requestCount,
+                rateLimitLimit: limit ? parseInt(limit) : null,
+                rateLimitRemaining: remaining ? parseInt(remaining) : null
+                });
+            }
 
-      if (response.status === 401) {
-        throw new Error("Token expirado o credenciales inválidas (401).");
-      }
-      
-      // Dejamos pasar errores normales para que los métodos los manejen
-      return response;
-    } catch (error) {
-      throw error;
+            if (response.status === 401) {
+                throw new Error("Token expirado o credenciales inválidas (401).");
+            }
+            
+            return response;
+        } catch (error) {
+            // Errores de red (fetch fail) no relacionados con 429 se lanzan
+            throw error;
+        }
     }
   }
 
